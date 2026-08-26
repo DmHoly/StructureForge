@@ -7,6 +7,7 @@
   --accent: #2563eb;
   --accent-text: #ffffff;
   --error: #b91c1c;
+  --success: #15803d;
   --canvas-bg: #ffffff;
 }
 
@@ -20,6 +21,7 @@
     --accent: #4d8dff;
     --accent-text: #0b0d10;
     --error: #ff8383;
+    --success: #4ade80;
     --canvas-bg: #101215;
   }
 }
@@ -174,6 +176,11 @@ button:hover {
 
 .error {
   color: var(--error);
+  font-size: 0.85rem;
+}
+
+.success {
+  color: var(--success);
   font-size: 0.85rem;
 }
 

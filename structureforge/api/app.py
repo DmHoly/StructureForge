@@ -39,6 +39,21 @@ class SimulateResponse(BaseModel):
     material_colors: dict[str, str]
 
 
+class ExportFollowRequest(BaseModel):
+    substrate: SubstrateSpec
+    steps: list[ProcessStep]
+    repo_path: str
+    branch: str = "main"
+    title: str
+    intent: str
+
+
+class ExportFollowResponse(BaseModel):
+    experiment_id: str
+    branch: str
+    title: str
+
+
 def create_app(materials: MaterialLibrary | None = None, recipes: RecipeLibrary | None = None) -> FastAPI:
     materials = materials or default_library()
     recipes = recipes or default_recipes()
@@ -62,28 +77,58 @@ def create_app(materials: MaterialLibrary | None = None, recipes: RecipeLibrary 
             "etch": [r.model_dump(mode="json") for r in recipes.etch.values()],
         }
 
-    @app.post("/api/simulate")
-    def run_simulation(request: SimulateRequest) -> SimulateResponse:
+    def _build_and_simulate(substrate: SubstrateSpec, steps: list[ProcessStep]) -> tuple[Geometry, list]:
         try:
-            materials.get(request.substrate.material)
+            materials.get(substrate.material)
         except KeyError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        geometry = Geometry.substrate(
-            request.substrate.material,
-            request.substrate.domain_width.to_nm(),
-            request.substrate.thickness.to_nm(),
-        )
+        geometry = Geometry.substrate(substrate.material, substrate.domain_width.to_nm(), substrate.thickness.to_nm())
         try:
-            frames = simulate(geometry, request.steps, materials, recipes)
+            frames = simulate(geometry, steps, materials, recipes)
         except SimulationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return geometry, frames
 
+    @app.post("/api/simulate")
+    def run_simulation(request: SimulateRequest) -> SimulateResponse:
+        _geometry, frames = _build_and_simulate(request.substrate, request.steps)
         used_materials = {m.name: m.color for m in materials}
         return SimulateResponse(
             frames=[f.to_dict() for f in frames],
             material_colors=used_materials,
         )
+
+    @app.post("/api/export_follow")
+    def export_follow(request: ExportFollowRequest) -> ExportFollowResponse:
+        try:
+            import follow
+
+            from ..adapters import follow_adapter
+        except ImportError as exc:
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "l'export vers Follow necessite la dependance optionnelle 'follow' - "
+                    "installez-la avec `pip install structureforge[follow]`"
+                ),
+            ) from exc
+
+        geometry, _frames = _build_and_simulate(request.substrate, request.steps)
+        repo = follow.Repository(request.repo_path)
+        try:
+            experiment = follow_adapter.export_experiment(
+                repo,
+                geometry,
+                request.steps,
+                branch=request.branch,
+                title=request.title,
+                intent=request.intent,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        return ExportFollowResponse(experiment_id=experiment.id, branch=experiment.branch, title=experiment.title)
 
     if STATIC_DIR.exists():
         app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

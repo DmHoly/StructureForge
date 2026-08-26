@@ -68,6 +68,43 @@ Ouvrir `http://127.0.0.1:8000`. On choisit le substrat, on ajoute des étapes un
 d'ensemble sur tout le domaine, vue zoomée sur une zone qu'on définit numériquement ou via
 « Cadrer sur la structure ») se mettent à jour ensemble, à chaque étape.
 
+## Exporter vers Follow
+
+`structureforge.adapters.follow_adapter` convertit une géométrie simulée et son historique de
+process en `follow.Structure` / `follow.Step`, et `export_experiment()` committe directement le
+tout dans un dépôt Follow :
+
+```bash
+pip install -e ".[follow]"   # ajoute la dependance follow (git+https://github.com/DmHoly/Follow.git)
+```
+
+```python
+import follow
+from structureforge.adapters import follow_adapter
+
+repo = follow.Repository("mon_labo")   # ou follow.Repository() pour un depot en memoire
+experiment = follow_adapter.export_experiment(
+    repo, geometry, process,           # `geometry` = l'etat final simule, `process` = la liste de ProcessStep
+    branch="main",
+    title="Isolation par tranchee peu profonde (STI)",
+    intent="Verifier le flow STI simule avant de le lancer en salle blanche",
+)
+print(follow.render_fiche(experiment, repo))
+```
+
+Voir `examples/export_to_follow.py` pour un script complet (simule le flow STI puis committe).
+Depuis la GUI, le panneau **Exporter vers Follow** (chemin du dépôt, branche, titre, intention)
+fait exactement la même chose via `POST /api/export_follow` - le dépôt Follow doit être accessible
+sur le disque du serveur qui exécute `structureforge`.
+
+`ProcessStructure` (la classe `follow.Structure` exportée : `domain_width_nm` + une liste de
+couches `{material, rings}`) et `LayerSpec` sont définies **au niveau du module**, pas à
+l'intérieur d'une fonction - `follow.Structure.registry_key()` dérive de `__module__` +
+`__qualname__`, et une classe imbriquée dans une fonction obtient un `__qualname__` contenant
+`<locals>`, ce que la docstring de `follow.Structure` signale explicitement comme cassant la
+résolution `--structure-type module.Classe` de la CLI Follow et réenregistrant une entrée neuve à
+chaque appel plutôt que de réutiliser la même classe.
+
 ## Concepts
 
 | Concept | Rôle |
@@ -133,9 +170,9 @@ structureforge/
   geometry/       le moteur (Geometry/Layer, operations booleennes shapely)
   process/        les briques de process (ProcessStep) et simulate()
   presentation/   export SVG d'une Frame (script/notebook, sans la GUI)
-  adapters/       pont optionnel vers follow (import paresseux, extra [follow])
+  adapters/       pont optionnel vers follow (export_experiment/to_structure/to_steps, extra [follow])
   api/            backend FastAPI + frontend statique (vanilla JS/SVG, extra [api])
-examples/         flows de process complets et executables (STI planaire, nanofils III-N)
+examples/         flows de process complets et executables (STI planaire, nanofils III-N, export Follow)
 tests/            suite pytest (materiaux, recettes, moteur geometrique, simulate, API)
 ```
 

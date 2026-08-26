@@ -132,16 +132,17 @@ function showSimError(message) {
   }
 }
 
+function buildSubstrateSpec() {
+  return {
+    material: $("substrate-material").value,
+    domain_width: { value: parseFloat($("domain-width").value), unit: "nm" },
+    thickness: { value: parseFloat($("substrate-thickness").value), unit: "nm" },
+  };
+}
+
 async function runSimulation() {
   showSimError(null);
-  const body = {
-    substrate: {
-      material: $("substrate-material").value,
-      domain_width: { value: parseFloat($("domain-width").value), unit: "nm" },
-      thickness: { value: parseFloat($("substrate-thickness").value), unit: "nm" },
-    },
-    steps: state.steps,
-  };
+  const body = { substrate: buildSubstrateSpec(), steps: state.steps };
   let response;
   try {
     response = await fetch("/api/simulate", {
@@ -165,6 +166,53 @@ async function runSimulation() {
   slider.value = String(data.frames.length - 1);
   setFrame(data.frames.length - 1);
   fitZoomToStructure();
+}
+
+function showFollowMessage(kind, message) {
+  const errorEl = $("follow-error");
+  const successEl = $("follow-success");
+  errorEl.hidden = true;
+  successEl.hidden = true;
+  if (!message) return;
+  const el = kind === "error" ? errorEl : successEl;
+  el.hidden = false;
+  el.textContent = message;
+}
+
+async function exportToFollow() {
+  showFollowMessage(null);
+  const repoPath = $("follow-repo-path").value.trim();
+  const title = $("follow-title").value.trim();
+  const intent = $("follow-intent").value.trim();
+  if (!repoPath || !title || !intent) {
+    showFollowMessage("error", "Chemin du depot, titre et intention sont obligatoires.");
+    return;
+  }
+  const body = {
+    substrate: buildSubstrateSpec(),
+    steps: state.steps,
+    repo_path: repoPath,
+    branch: $("follow-branch").value.trim() || "main",
+    title,
+    intent,
+  };
+  let response;
+  try {
+    response = await fetch("/api/export_follow", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    showFollowMessage("error", `Erreur reseau: ${err}`);
+    return;
+  }
+  const data = await response.json();
+  if (!response.ok) {
+    showFollowMessage("error", data.detail ? JSON.stringify(data.detail) : "Erreur d'export");
+    return;
+  }
+  showFollowMessage("success", `Experience Follow ${data.experiment_id} committee sur la branche "${data.branch}".`);
 }
 
 function computeGlobalBounds(frames) {
@@ -266,6 +314,9 @@ function wireEvents() {
   });
   $("simulate-btn").addEventListener("click", () => {
     runSimulation().catch((err) => showSimError(String(err)));
+  });
+  $("export-follow-btn").addEventListener("click", () => {
+    exportToFollow().catch((err) => showFollowMessage("error", String(err)));
   });
   $("frame-slider").addEventListener("input", (e) => setFrame(parseInt(e.target.value, 10)));
   $("zoom-fit-btn").addEventListener("click", fitZoomToStructure);

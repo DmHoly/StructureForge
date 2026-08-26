@@ -112,6 +112,25 @@
         <button id="simulate-btn" type="button" class="primary">Simuler</button>
         <p id="sim-error" class="error" hidden></p>
       </section>
+
+      <section class="panel">
+        <h2>Exporter vers Follow</h2>
+        <label>Chemin du depot Follow
+          <input id="follow-repo-path" type="text" placeholder="ex. ./mon_labo" />
+        </label>
+        <label>Branche
+          <input id="follow-branch" type="text" value="main" />
+        </label>
+        <label>Titre
+          <input id="follow-title" type="text" placeholder="ex. Tranchee STI - essai 1" />
+        </label>
+        <label>Intention
+          <input id="follow-intent" type="text" placeholder="ex. Valider la profondeur de gravure" />
+        </label>
+        <button id="export-follow-btn" type="button">Exporter vers Follow</button>
+        <p id="follow-error" class="error" hidden></p>
+        <p id="follow-success" class="success" hidden></p>
+      </section>
     </aside>
 
     <section class="canvas-area">
