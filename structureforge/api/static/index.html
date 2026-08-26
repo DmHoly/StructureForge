@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StructureForge</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>StructureForge</h1>
+    <p class="subtitle">Simulateur de process 2D (vue en coupe) - depot, gravure, planarisation, etapes chimiques</p>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel">
+        <h2>Substrat</h2>
+        <label>Materiau
+          <select id="substrate-material"></select>
+        </label>
+        <label>Largeur du domaine (nm)
+          <input id="domain-width" type="number" value="200" min="1" step="1" />
+        </label>
+        <label>Epaisseur du substrat (nm)
+          <input id="substrate-thickness" type="number" value="50" min="1" step="1" />
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>Ajouter une etape</h2>
+        <label>Type d'etape
+          <select id="step-kind">
+            <option value="deposition">Depot</option>
+            <option value="etch">Gravure</option>
+            <option value="planarization">Planarisation</option>
+            <option value="lithography">Lithographie (masque resine)</option>
+            <option value="resist_strip">Retrait de resine</option>
+            <option value="chemical">Etape chimique (nettoyage, recuit...)</option>
+          </select>
+        </label>
+        <label>Nom
+          <input id="step-name" type="text" placeholder="ex. Oxyde de champ" />
+        </label>
+
+        <div id="fields-deposition" class="step-fields">
+          <label>Materiau depose
+            <select id="dep-material"></select>
+          </label>
+          <label>Recette de depot
+            <select id="dep-recipe"></select>
+          </label>
+          <label>Epaisseur (nm)
+            <input id="dep-thickness" type="number" value="20" min="0" step="0.1" />
+          </label>
+        </div>
+
+        <div id="fields-etch" class="step-fields">
+          <label>Recette de gravure
+            <select id="etch-recipe"></select>
+          </label>
+          <label>Profondeur nominale (nm)
+            <input id="etch-depth" type="number" value="20" min="0" step="0.1" />
+          </label>
+        </div>
+
+        <div id="fields-planarization" class="step-fields">
+          <label>Mode
+            <select id="pla-mode">
+              <option value="stop_material">S'arreter sur un materiau</option>
+              <option value="target_level">Niveau cible (nm)</option>
+            </select>
+          </label>
+          <label id="pla-stop-wrap">Materiau d'arret
+            <select id="pla-stop-material"></select>
+          </label>
+          <label id="pla-level-wrap" style="display:none">Niveau cible (nm, 0 = haut du substrat)
+            <input id="pla-level" type="number" value="0" step="0.1" />
+          </label>
+        </div>
+
+        <div id="fields-lithography" class="step-fields">
+          <label>Materiau de resine
+            <select id="litho-material"></select>
+          </label>
+          <label>Epaisseur de resine (nm)
+            <input id="litho-thickness" type="number" value="5" min="0" step="0.1" />
+          </label>
+          <label>Ouvertures du masque (x0-x1, separees par des virgules)
+            <input id="litho-openings" type="text" placeholder="ex. 80-120, 150-170" />
+          </label>
+        </div>
+
+        <div id="fields-resist_strip" class="step-fields">
+          <label>Materiau a retirer
+            <select id="strip-material"></select>
+          </label>
+        </div>
+
+        <div id="fields-chemical" class="step-fields">
+          <label>Description
+            <input id="chem-description" type="text" placeholder="ex. Nettoyage HF, recuit 950C 30min..." />
+          </label>
+        </div>
+
+        <button id="add-step-btn" type="button">Ajouter l'etape</button>
+      </section>
+
+      <section class="panel">
+        <h2>Etapes du process</h2>
+        <ol id="step-list" class="step-list"></ol>
+        <button id="simulate-btn" type="button" class="primary">Simuler</button>
+        <p id="sim-error" class="error" hidden></p>
+      </section>
+    </aside>
+
+    <section class="canvas-area">
+      <div class="timeline">
+        <label for="frame-slider">Etape : <span id="frame-label">-</span></label>
+        <input id="frame-slider" type="range" min="0" max="0" value="0" step="1" />
+      </div>
+
+      <div class="views">
+        <div class="view-panel">
+          <h3>Vue d'ensemble</h3>
+          <svg id="view-overview" class="structure-view" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+        <div class="view-panel">
+          <h3>Vue zoomee (zone active)</h3>
+          <div class="zoom-controls">
+            <label>x0 <input id="zoom-x0" type="number" value="0" step="1" /></label>
+            <label>x1 <input id="zoom-x1" type="number" value="200" step="1" /></label>
+            <label>y0 <input id="zoom-y0" type="number" value="-20" step="1" /></label>
+            <label>y1 <input id="zoom-y1" type="number" value="20" step="1" /></label>
+            <button id="zoom-fit-btn" type="button">Cadrer sur la structure</button>
+          </div>
+          <svg id="view-zoom" class="structure-view" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

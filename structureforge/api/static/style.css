@@ -1,0 +1,258 @@
+:root {
+  --bg: #f7f7f9;
+  --panel-bg: #ffffff;
+  --text: #1c1e21;
+  --muted: #6b7280;
+  --border: #d9dce1;
+  --accent: #2563eb;
+  --accent-text: #ffffff;
+  --error: #b91c1c;
+  --canvas-bg: #ffffff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --panel-bg: #1c1f24;
+    --text: #e7e9ec;
+    --muted: #9aa1ab;
+    --border: #33373f;
+    --accent: #4d8dff;
+    --accent-text: #0b0d10;
+    --error: #ff8383;
+    --canvas-bg: #101215;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.topbar {
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.subtitle {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 1rem;
+  padding: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.panel h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.6rem;
+}
+
+input,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.4rem 0.5rem;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--panel-bg);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.5rem 0.8rem;
+}
+
+button.primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+button:hover {
+  filter: brightness(1.08);
+}
+
+.step-fields {
+  display: none;
+}
+
+.step-fields.active {
+  display: block;
+}
+
+#add-step-btn {
+  width: 100%;
+  margin-top: 0.25rem;
+}
+
+.step-list {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.step-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.step-list .step-kind {
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  margin-right: 0.4rem;
+}
+
+.step-list button {
+  padding: 0.1rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+.error {
+  color: var(--error);
+  font-size: 0.85rem;
+}
+
+.canvas-area {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.timeline {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.timeline label {
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+#frame-slider {
+  width: 100%;
+}
+
+.views {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+@media (max-width: 900px) {
+  .views {
+    grid-template-columns: 1fr;
+  }
+}
+
+.view-panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  min-width: 0;
+}
+
+.view-panel h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.zoom-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.zoom-controls label {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+}
+
+.zoom-controls input {
+  width: 4.5rem;
+  padding: 0.2rem 0.3rem;
+}
+
+.structure-view {
+  width: 100%;
+  height: 360px;
+  background: var(--canvas-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: block;
+}
