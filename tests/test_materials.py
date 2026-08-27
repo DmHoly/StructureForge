@@ -5,16 +5,24 @@ from structureforge.core.materials import Material, MaterialCategory, MaterialLi
 
 def test_default_library_has_the_common_materials(materials):
     for name in [
-        "Si", "SiC", "Sapphire", "SiO2", "Si3N4", "HfO2",
-        "GaN", "AlN", "AlGaN", "InGaN", "GaAs", "Ge",
-        "Al", "W", "Ti", "TiN", "Cu",
-        "Photoresist", "PMMA",
+        # substrates
+        "Si", "SiC", "Sapphire", "InP",
+        # dielectrics
+        "SiO2", "Si3N4", "Al2O3", "HfO2", "ZrO2", "Ta2O5", "TiO2", "SiON", "MgF2", "Polyimide", "BCB",
+        # semiconductors
+        "Poly-Si", "Ge", "SiGe", "GaAs", "AlAs", "GaP", "GaSb", "InAs", "InSb", "ZnO",
+        "GaN", "AlN", "AlGaN", "InGaN",
+        # metals (+ ITO, a transparent conductive oxide grouped with metals)
+        "Al", "W", "Ti", "TiN", "Cu", "Au", "Ag", "Ni", "Pt", "Pd", "Mo", "Ta", "ITO",
+        # resists
+        "Photoresist", "PMMA", "HSQ", "SU-8",
     ]:
         assert name in materials
     assert materials.get("SiO2").category is MaterialCategory.dielectric
     assert materials.get("GaN").category is MaterialCategory.semiconductor
     assert materials.get("Sapphire").category is MaterialCategory.substrate
     assert materials.get("PMMA").category is MaterialCategory.resist
+    assert materials.get("ITO").category is MaterialCategory.metal
 
 
 def test_get_unknown_material_raises_with_useful_message(materials):
