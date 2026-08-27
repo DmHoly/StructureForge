@@ -4,10 +4,17 @@ from structureforge.core.materials import Material, MaterialCategory, MaterialLi
 
 
 def test_default_library_has_the_common_materials(materials):
-    for name in ["Si", "SiO2", "Si3N4", "GaN", "AlGaN", "InGaN", "Photoresist"]:
+    for name in [
+        "Si", "SiC", "Sapphire", "SiO2", "Si3N4", "HfO2",
+        "GaN", "AlN", "AlGaN", "InGaN", "GaAs", "Ge",
+        "Al", "W", "Ti", "TiN", "Cu",
+        "Photoresist", "PMMA",
+    ]:
         assert name in materials
     assert materials.get("SiO2").category is MaterialCategory.dielectric
     assert materials.get("GaN").category is MaterialCategory.semiconductor
+    assert materials.get("Sapphire").category is MaterialCategory.substrate
+    assert materials.get("PMMA").category is MaterialCategory.resist
 
 
 def test_get_unknown_material_raises_with_useful_message(materials):

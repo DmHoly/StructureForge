@@ -2,8 +2,9 @@
 
 Layers are shapely polygons kept in construction order. Deposition/etch/planarization are all
 implemented as boolean operations on that stack. See `Geometry`'s docstring for the v1
-simplifications (no inter-feature shadowing, domain edges treated as symmetry boundaries,
-substep-based selective etch) - they're deliberate scope cuts for a first version, not oversights.
+simplifications (hard-silhouette directional shadowing, domain edges treated as symmetry
+boundaries, substep-based selective etch) - they're deliberate scope cuts for a first version,
+not oversights.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from ..core.recipes import DepositionMode, DepositionRecipe, EtchMode, EtchRecip
 _EPS_AREA = 1e-6  # nm^2 - polygons smaller than this are numerical noise, dropped
 _MARGIN = 1.0  # nm of slack padding used around bounding boxes for directional etch
 _GUARD_MARGIN = 1.0e4  # nm - "effectively infinite" padding for other-factor layers during etch, see Geometry.etch
+_BULK_MARGIN = 1.0e4  # nm - "effectively infinite" downward extension standing in for the wafer's bulk, see floor_nm
 _SIMPLIFY_TOL = 0.02  # nm - keeps vertex count from growing unboundedly over many substeps
 
 
@@ -45,16 +47,33 @@ def _drop_tiny(geom: BaseGeometry) -> BaseGeometry:
     return geom if geom.area > _EPS_AREA else Polygon()
 
 
-def sweep_union(geom: BaseGeometry, vector: tuple[float, float], steps: int = 32) -> BaseGeometry:
-    """The Minkowski sum of `geom` with the segment from (0,0) to `vector`, approximated by
-    sampling the sweep at `steps` intermediate translations and unioning them. Exact in the limit;
-    this is what "directional" deposition/etch actually mean - a uniform offset in one direction,
-    rather than every direction like `.buffer()`.
+def sweep_union(geom: BaseGeometry, vector: tuple[float, float]) -> BaseGeometry:
+    """The exact Minkowski sum of `geom` with the segment from (0,0) to `vector` - this is what
+    "directional" deposition/etch actually mean: a uniform offset in one direction, rather than
+    every direction like `.buffer()`.
+
+    Computed directly rather than by sampling many intermediate translations: the union of `geom`,
+    `geom` translated by `vector`, and - for every edge of every ring of every part of `geom` - the
+    parallelogram that edge sweeps out along `vector`, is exactly the swept region (sweeping a
+    rigid shape along a straight line traces out its own two end positions plus, along the way,
+    the quad each edge carries with it). Besides being exact rather than an approximation, this
+    sidesteps a real GEOS robustness trap the earlier sampled version had: many translated copies
+    at regular, exactly-aligned offsets is a textbook way to trigger a spurious "side location
+    conflict" TopologyException in `unary_union` (axis-parallel edges landing exactly on top of
+    each other at various samples) - a handful of edge-quads doesn't have that failure mode.
     """
     if geom.is_empty or (vector[0] == 0 and vector[1] == 0):
         return geom
-    parts = [translate(geom, vector[0] * t / steps, vector[1] * t / steps) for t in range(steps + 1)]
-    return _clean(unary_union(parts))
+    parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+    pieces = [geom, translate(geom, vector[0], vector[1])]
+    for part in parts:
+        for ring in [part.exterior, *part.interiors]:
+            coords = list(ring.coords)
+            for (x1, y1), (x2, y2) in zip(coords, coords[1:]):
+                pieces.append(
+                    Polygon([(x1, y1), (x2, y2), (x2 + vector[0], y2 + vector[1]), (x1 + vector[0], y1 + vector[1])])
+                )
+    return _clean(unary_union(pieces))
 
 
 def beam_vector(angle_deg: float, length: float) -> tuple[float, float]:
@@ -172,7 +191,7 @@ class Geometry:
         """
         if self.floor_nm is None or geom.is_empty:
             return geom
-        bulk = box(0.0, self.floor_nm - 1.0e7, self.domain_width_nm, self.floor_nm)
+        bulk = box(0.0, self.floor_nm - _BULK_MARGIN, self.domain_width_nm, self.floor_nm)
         return _clean(unary_union([geom, bulk]))
 
     def _pad(self, geom: BaseGeometry) -> BaseGeometry:
@@ -201,20 +220,27 @@ class Geometry:
             extended.append(unary_union([part, above]))
         return _clean(unary_union(extended))
 
-    def _shadow(self, padded_solid: BaseGeometry, angle_deg: float, y_min: float, y_max: float) -> BaseGeometry:
-        """The region shadowed by `padded_solid` for a beam tilted `angle_deg`: everywhere "behind"
+    def _shadow(self, solid: BaseGeometry, angle_deg: float, y_min: float, y_max: float) -> BaseGeometry:
+        """The region shadowed by `solid` for a beam tilted `angle_deg`: everywhere "behind"
         existing material, continuing in the beam's own forward direction, out to a length that
         safely spans the current structure. A directional process (deposition or etch) can't
         affect anything back there - which is what makes a feature's own leeward face, and a
         shorter feature standing behind a taller one, correctly stay untouched instead of being
         coated/etched as if the beam went straight through solid matter to reach them.
+
+        Only mirror-padded (domain edges), deliberately *not* bulk-padded (`floor_nm`): the shadow
+        sweep only ever extends a silhouette further along the beam direction, so there's no false
+        "wafer backside" boundary to worry about here the way `deposit`/`etch` need to - and
+        skipping it keeps this sweep's coordinates at the structure's own scale rather than the
+        bulk pad's ~1e7 nm extension, which paired badly with `_UNION_GRID`'s precision.
         """
-        if padded_solid.is_empty:
-            return padded_solid
+        if solid.is_empty:
+            return solid
+        padded = self._mirror_pad(solid)
         span = (y_max - y_min) + self.domain_width_nm + _MARGIN
         dx, dy = beam_vector(angle_deg, span)
-        swept = sweep_union(padded_solid, (dx, dy), steps=64)
-        return swept.difference(padded_solid)
+        swept = sweep_union(padded, (dx, dy))
+        return swept.difference(padded)
 
     def _domain_box(self, y_min: float, y_max: float) -> BaseGeometry:
         return box(0.0, y_min, self.domain_width_nm, y_max)
@@ -265,7 +291,7 @@ class Geometry:
         padded = self._pad(solid)
         swept = sweep_union(padded, (-dx, -dy))
         film_raw = swept.difference(padded)
-        shadow = self._shadow(padded, angle_deg, y_min, y_max)
+        shadow = self._shadow(solid, angle_deg, y_min, y_max)
         film = self._crop(film_raw.difference(shadow), y_min - thickness_nm, y_max + thickness_nm)
         if not film.is_empty:
             self.layers.append(Layer(material=material, polygon=film))
@@ -322,7 +348,7 @@ class Geometry:
             padded_plain = self._pad(solid)
             padded_solid_boundary = padded_plain.boundary
             shadow = (
-                self._shadow(padded_plain, recipe.angle_deg, y_min, y_max)
+                self._shadow(solid, recipe.angle_deg, y_min, y_max)
                 if recipe.mode is EtchMode.directional
                 else None
             )

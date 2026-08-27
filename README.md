@@ -50,9 +50,11 @@ save_svg("trench.svg", frames[-1], {m.name: m.color for m in materials})
 ```
 
 Voir `examples/trench_isolation.py` (flow STI planaire complet : pad oxide, nitrure d'arrêt,
-masque, gravure, remplissage, CMP) et `examples/nanowire_pzgan.py` (empilement GaN/AlGaN/InGaN/GaN
-gravé en réseau de nanofils par lithographie EBL + gravure directionnelle inclinée - le cas
-multi-échelle qui a motivé le projet).
+masque, gravure, remplissage, CMP), `examples/nanowire_pzgan.py` (empilement GaN/AlGaN/InGaN/GaN
+gravé en réseau de nanofils par lithographie EBL (masque PMMA) + gravure Cl2 ICP-RIE sélective -
+le cas multi-échelle qui a motivé le projet) et `examples/koh_v_groove.py` (gravure humide KOH
+anisotrope du silicium, auto-limitée sur les plans {111} à 54.7° - démontre l'ombrage directionnel
+sur une cavité qui se referme).
 
 ## Interface graphique web
 

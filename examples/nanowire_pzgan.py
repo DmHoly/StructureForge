@@ -46,17 +46,17 @@ def main() -> None:
         openings.append((cursor, domain_width))
 
     steps = [
-        Deposition(name="Barriere AlGaN", material="AlGaN", recipe="ALD Conformal", thickness=Length.nm(15)),
-        Deposition(name="Puits quantique InGaN", material="InGaN", recipe="ALD Conformal", thickness=Length.nm(3)),
-        Deposition(name="Capot GaN", material="GaN", recipe="ALD Conformal", thickness=Length.nm(10)),
+        Deposition(name="Barriere AlGaN", material="AlGaN", recipe="MOCVD Epitaxial", thickness=Length.nm(15)),
+        Deposition(name="Puits quantique InGaN", material="InGaN", recipe="MOCVD Epitaxial", thickness=Length.nm(3)),
+        Deposition(name="Capot GaN", material="GaN", recipe="MOCVD Epitaxial", thickness=Length.nm(10)),
         Lithography(
             name="Masque EBL nanofils",
-            resist_material="Photoresist",
+            resist_material="PMMA",
             thickness=Length.nm(80),
             openings=openings,
         ),
-        Etch(name="Gravure ICP-RIE des nanofils", recipe="Ion Mill (tilted)", depth=Length.nm(60)),
-        ResistStrip(name="Retrait resine"),
+        Etch(name="Gravure Cl2 ICP-RIE des nanofils", recipe="Cl2 ICP-RIE (III-N)", depth=Length.nm(60)),
+        ResistStrip(name="Retrait resine", material="PMMA"),
         ChemicalStep(name="Passivation de surface", description="Traitement de surface (S)2- ou similaire"),
     ]
 

@@ -111,6 +111,16 @@ def default_recipes() -> RecipeLibrary:
             angle_deg=0.0,
             notes="Straight line-of-sight from directly overhead - poor sidewall coverage, good for lift-off.",
         ),
+        DepositionRecipe(
+            name="MOCVD Epitaxial",
+            mode=DepositionMode.conformal,
+            notes=(
+                "III-N/III-V epitaxial growth (GaN, AlGaN, InGaN...). Modelled as conformal like "
+                "any other blanket growth - real epitaxy is crystallographic/faceted, which this "
+                "engine doesn't simulate; conformal is the closest built-in approximation for a "
+                "layer grown on an already-flat template."
+            ),
+        ),
     ]
     etch = [
         EtchRecipe(
@@ -141,6 +151,26 @@ def default_recipes() -> RecipeLibrary:
             angle_deg=30.0,
             default_factor=1.0,
             notes="Tilted physical (ion-milling) etch, roughly material-independent.",
+        ),
+        EtchRecipe(
+            name="KOH Anisotropic Wet Etch",
+            mode=EtchMode.directional,
+            angle_deg=54.7,
+            selectivity_by_material={"Si": 1.0},
+            default_factor=0.02,
+            notes=(
+                "Crystallographic wet etch of Si (100), self-terminating on {111} planes at "
+                "54.7deg from the surface - modelled here as a directional etch at that fixed "
+                "angle. Stops almost completely on oxide/nitride masks and anything else."
+            ),
+        ),
+        EtchRecipe(
+            name="Cl2 ICP-RIE (III-N)",
+            mode=EtchMode.directional,
+            angle_deg=0.0,
+            selectivity_by_material={"GaN": 1.0, "AlGaN": 1.0, "InGaN": 1.0, "AlN": 1.0},
+            default_factor=0.05,
+            notes="Near-vertical dry etch of the III-N family (GaN/AlGaN/InGaN/AlN); selective over masks/dielectrics/metals.",
         ),
     ]
     return RecipeLibrary(deposition={r.name: r for r in deposition}, etch={r.name: r for r in etch})
