@@ -8,8 +8,14 @@
 </head>
 <body>
   <header class="topbar">
-    <h1>StructureForge</h1>
-    <p class="subtitle">Simulateur de process 2D (vue en coupe) - depot, gravure, planarisation, etapes chimiques</p>
+    <div class="topbar-heading">
+      <h1>StructureForge</h1>
+      <p class="subtitle">Simulateur de process 2D (vue en coupe) - depot, gravure, planarisation, etapes chimiques</p>
+    </div>
+    <div class="topbar-actions">
+      <button id="open-recipes-btn" type="button" class="ghost">Recettes</button>
+      <button id="open-follow-btn" type="button" class="ghost">Exporter vers Follow</button>
+    </div>
   </header>
 
   <main class="layout">
@@ -19,29 +25,33 @@
         <label>Materiau
           <select id="substrate-material"></select>
         </label>
-        <label>Largeur du domaine (nm)
-          <input id="domain-width" type="number" value="200" min="1" step="1" />
-        </label>
-        <label>Epaisseur du substrat (nm)
-          <input id="substrate-thickness" type="number" value="50" min="1" step="1" />
-        </label>
+        <div class="field-row">
+          <label>Largeur du domaine (nm)
+            <input id="domain-width" type="number" value="200" min="1" step="1" />
+          </label>
+          <label>Epaisseur du substrat (nm)
+            <input id="substrate-thickness" type="number" value="50" min="1" step="1" />
+          </label>
+        </div>
       </section>
 
       <section class="panel">
         <h2>Ajouter une etape</h2>
-        <label>Type d'etape
-          <select id="step-kind">
-            <option value="deposition">Depot</option>
-            <option value="etch">Gravure</option>
-            <option value="planarization">Planarisation</option>
-            <option value="lithography">Lithographie (masque resine)</option>
-            <option value="resist_strip">Retrait de resine</option>
-            <option value="chemical">Etape chimique (nettoyage, recuit...)</option>
-          </select>
-        </label>
-        <label>Nom
-          <input id="step-name" type="text" placeholder="ex. Oxyde de champ" />
-        </label>
+        <div class="field-row">
+          <label>Type d'etape
+            <select id="step-kind">
+              <option value="deposition">Depot</option>
+              <option value="etch">Gravure</option>
+              <option value="planarization">Planarisation</option>
+              <option value="lithography">Lithographie (masque resine)</option>
+              <option value="resist_strip">Retrait de resine</option>
+              <option value="chemical">Etape chimique (nettoyage, recuit...)</option>
+            </select>
+          </label>
+          <label>Nom
+            <input id="step-name" type="text" placeholder="ex. Oxyde de champ" />
+          </label>
+        </div>
 
         <div id="fields-deposition" class="step-fields">
           <label>Materiau depose
@@ -103,82 +113,15 @@
           </label>
         </div>
 
-        <button id="add-step-btn" type="button">Ajouter l'etape</button>
+        <button id="add-step-btn" type="button">+ Ajouter l'etape</button>
       </section>
 
       <section class="panel">
         <h2>Etapes du process</h2>
         <ol id="step-list" class="step-list"></ol>
+        <p id="step-list-empty" class="empty-hint">Aucune etape pour l'instant.</p>
         <button id="simulate-btn" type="button" class="primary">Simuler</button>
         <p id="sim-error" class="error" hidden></p>
-      </section>
-
-      <section class="panel">
-        <h2>Exporter vers Follow</h2>
-        <label>Chemin du depot Follow
-          <input id="follow-repo-path" type="text" placeholder="ex. ./mon_labo" />
-        </label>
-        <label>Branche
-          <input id="follow-branch" type="text" value="main" />
-        </label>
-        <label>Titre
-          <input id="follow-title" type="text" placeholder="ex. Tranchee STI - essai 1" />
-        </label>
-        <label>Intention
-          <input id="follow-intent" type="text" placeholder="ex. Valider la profondeur de gravure" />
-        </label>
-        <button id="export-follow-btn" type="button">Exporter vers Follow</button>
-        <p id="follow-error" class="error" hidden></p>
-        <p id="follow-success" class="success" hidden></p>
-      </section>
-
-      <section class="panel">
-        <h2>Gestionnaire de recettes</h2>
-        <div class="recipe-columns">
-          <div>
-            <h3>Depot</h3>
-            <ul id="recipe-list-deposition" class="recipe-list"></ul>
-          </div>
-          <div>
-            <h3>Gravure</h3>
-            <ul id="recipe-list-etch" class="recipe-list"></ul>
-          </div>
-        </div>
-
-        <h3>Ajouter / modifier une recette</h3>
-        <label>Type
-          <select id="recipe-kind">
-            <option value="deposition">Depot</option>
-            <option value="etch">Gravure</option>
-          </select>
-        </label>
-        <label>Nom
-          <input id="recipe-name" type="text" placeholder="ex. Ma gravure maison" />
-        </label>
-        <label>Mode
-          <select id="recipe-mode"></select>
-        </label>
-        <label id="recipe-angle-wrap">Angle (deg, 0 = incidence normale)
-          <input id="recipe-angle" type="number" value="0" step="0.1" />
-        </label>
-        <div id="recipe-etch-fields" class="step-fields">
-          <label>Facteur par defaut
-            <input id="recipe-default-factor" type="number" value="1.0" step="0.01" min="0" />
-          </label>
-          <label>Selectivite par materiau (nom:facteur, ...)
-            <input id="recipe-sel-material" type="text" placeholder="ex. Si:1.0, Photoresist:0.1" />
-          </label>
-          <label>Selectivite par categorie (substrate/semiconductor/dielectric/metal/resist/other:facteur, ...)
-            <input id="recipe-sel-category" type="text" placeholder="ex. dielectric:1.0" />
-          </label>
-        </div>
-        <label>Notes
-          <input id="recipe-notes" type="text" placeholder="Description libre" />
-        </label>
-        <button id="save-recipe-btn" type="button" class="primary">Enregistrer la recette</button>
-        <button id="clear-recipe-form-btn" type="button">Nouvelle recette (vider le formulaire)</button>
-        <p id="recipe-error" class="error" hidden></p>
-        <p id="recipe-success" class="success" hidden></p>
       </section>
     </aside>
 
@@ -207,6 +150,96 @@
       </div>
     </section>
   </main>
+
+  <div id="modal-backdrop" class="modal-backdrop" hidden>
+    <div id="modal-follow" class="modal" hidden>
+      <div class="modal-header">
+        <h2>Exporter vers Follow</h2>
+        <button type="button" class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body">
+        <label>Chemin du depot Follow
+          <input id="follow-repo-path" type="text" placeholder="ex. ./mon_labo" />
+        </label>
+        <div class="field-row">
+          <label>Branche
+            <input id="follow-branch" type="text" value="main" />
+          </label>
+          <label>Titre
+            <input id="follow-title" type="text" placeholder="ex. Tranchee STI - essai 1" />
+          </label>
+        </div>
+        <label>Intention
+          <input id="follow-intent" type="text" placeholder="ex. Valider la profondeur de gravure" />
+        </label>
+        <button id="export-follow-btn" type="button" class="primary">Exporter vers Follow</button>
+        <p id="follow-error" class="error" hidden></p>
+        <p id="follow-success" class="success" hidden></p>
+      </div>
+    </div>
+
+    <div id="modal-recipes" class="modal modal-wide" hidden>
+      <div class="modal-header">
+        <h2>Gestionnaire de recettes</h2>
+        <button type="button" class="modal-close" data-close-modal>&times;</button>
+      </div>
+      <div class="modal-body recipe-modal-body">
+        <div class="recipe-columns">
+          <div>
+            <h3>Depot</h3>
+            <ul id="recipe-list-deposition" class="recipe-list"></ul>
+          </div>
+          <div>
+            <h3>Gravure</h3>
+            <ul id="recipe-list-etch" class="recipe-list"></ul>
+          </div>
+        </div>
+
+        <div class="recipe-form">
+          <h3>Ajouter / modifier une recette</h3>
+          <div class="field-row">
+            <label>Type
+              <select id="recipe-kind">
+                <option value="deposition">Depot</option>
+                <option value="etch">Gravure</option>
+              </select>
+            </label>
+            <label>Nom
+              <input id="recipe-name" type="text" placeholder="ex. Ma gravure maison" />
+            </label>
+          </div>
+          <div class="field-row">
+            <label>Mode
+              <select id="recipe-mode"></select>
+            </label>
+            <label id="recipe-angle-wrap">Angle (deg, 0 = incidence normale)
+              <input id="recipe-angle" type="number" value="0" step="0.1" />
+            </label>
+          </div>
+          <div id="recipe-etch-fields" class="step-fields">
+            <label>Facteur par defaut
+              <input id="recipe-default-factor" type="number" value="1.0" step="0.01" min="0" />
+            </label>
+            <label>Selectivite par materiau (nom:facteur, ...)
+              <input id="recipe-sel-material" type="text" placeholder="ex. Si:1.0, Photoresist:0.1" />
+            </label>
+            <label>Selectivite par categorie (substrate/semiconductor/dielectric/metal/resist/other:facteur, ...)
+              <input id="recipe-sel-category" type="text" placeholder="ex. dielectric:1.0" />
+            </label>
+          </div>
+          <label>Notes
+            <input id="recipe-notes" type="text" placeholder="Description libre" />
+          </label>
+          <div class="button-row">
+            <button id="save-recipe-btn" type="button" class="primary">Enregistrer la recette</button>
+            <button id="clear-recipe-form-btn" type="button">Nouvelle recette</button>
+          </div>
+          <p id="recipe-error" class="error" hidden></p>
+          <p id="recipe-success" class="success" hidden></p>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
 </body>

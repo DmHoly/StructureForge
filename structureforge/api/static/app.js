@@ -12,6 +12,17 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+function openModal(modalId) {
+  document.querySelectorAll(".modal").forEach((m) => {
+    m.hidden = m.id !== modalId;
+  });
+  $("modal-backdrop").hidden = false;
+}
+
+function closeModals() {
+  $("modal-backdrop").hidden = true;
+}
+
 function optionsHtml(names) {
   return names.map((n) => `<option value="${n}">${n}</option>`).join("");
 }
@@ -107,6 +118,7 @@ function buildStepFromForm() {
 function renderStepList() {
   const list = $("step-list");
   list.innerHTML = "";
+  $("step-list-empty").hidden = state.steps.length > 0;
   state.steps.forEach((step, i) => {
     const li = document.createElement("li");
     li.innerHTML = `<span><span class="step-kind">${step.kind}</span>${step.name}</span>`;
@@ -437,10 +449,92 @@ function ringToPathD(ring) {
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
+function niceStep(range) {
+  const rough = range / 6;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(rough)));
+  const residual = rough / magnitude;
+  if (residual > 5) return 10 * magnitude;
+  if (residual > 2) return 5 * magnitude;
+  if (residual > 1) return 2 * magnitude;
+  return magnitude;
+}
+
+function formatAxisValue(v) {
+  return Math.abs(v) < 1e-9 ? "0" : String(Math.round(v * 100) / 100);
+}
+
+function drawGrid(svg, box, stepX, stepY) {
+  const gridGroup = document.createElementNS(SVG_NS, "g");
+  gridGroup.setAttribute("transform", "scale(1,-1)");
+
+  const xStart = Math.ceil(box.x0 / stepX) * stepX;
+  for (let x = xStart; x <= box.x1; x += stepX) {
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", x);
+    line.setAttribute("x2", x);
+    line.setAttribute("y1", -box.y0);
+    line.setAttribute("y2", -box.y1);
+    line.setAttribute("class", Math.abs(x) < stepX / 1e6 ? "axis-line" : "axis-grid");
+    gridGroup.appendChild(line);
+  }
+  const yStart = Math.ceil(box.y0 / stepY) * stepY;
+  for (let y = yStart; y <= box.y1; y += stepY) {
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("y1", -y);
+    line.setAttribute("y2", -y);
+    line.setAttribute("x1", box.x0);
+    line.setAttribute("x2", box.x1);
+    line.setAttribute("class", Math.abs(y) < stepY / 1e6 ? "axis-line" : "axis-grid");
+    gridGroup.appendChild(line);
+  }
+  svg.appendChild(gridGroup);
+}
+
+function drawAxisLabels(svg, box, stepX, stepY) {
+  // Direct children of <svg> (not the flipped group used for the grid/geometry) so the text
+  // itself renders upright; placing them at (x, -y) reuses the same y-flip the viewBox encodes.
+  const fontSize = (box.x1 - box.x0) * 0.022;
+  const labelGroup = document.createElementNS(SVG_NS, "g");
+  const xStart = Math.ceil(box.x0 / stepX) * stepX;
+  for (let x = xStart; x <= box.x1; x += stepX) {
+    const t = document.createElementNS(SVG_NS, "text");
+    t.setAttribute("x", x);
+    t.setAttribute("y", -box.y0 + fontSize * 1.3);
+    t.setAttribute("class", "axis-label");
+    t.setAttribute("font-size", fontSize);
+    t.setAttribute("text-anchor", "middle");
+    t.textContent = formatAxisValue(x);
+    labelGroup.appendChild(t);
+  }
+  const yStart = Math.ceil(box.y0 / stepY) * stepY;
+  for (let y = yStart; y <= box.y1; y += stepY) {
+    const t = document.createElementNS(SVG_NS, "text");
+    t.setAttribute("x", box.x0 + fontSize * 0.4);
+    t.setAttribute("y", -y - fontSize * 0.35);
+    t.setAttribute("class", "axis-label");
+    t.setAttribute("font-size", fontSize);
+    t.textContent = formatAxisValue(y);
+    labelGroup.appendChild(t);
+  }
+  svg.appendChild(labelGroup);
+}
+
 function drawView(svg, frame, box) {
   while (svg.firstChild) svg.removeChild(svg.firstChild);
   if (!box || box.x1 <= box.x0 || box.y1 <= box.y0) return;
-  svg.setAttribute("viewBox", `${box.x0} ${-box.y1} ${box.x1 - box.x0} ${box.y1 - box.y0}`);
+  // A small margin around the true data box, so the axis tick labels (drawn just outside it)
+  // have room instead of being clipped by the viewBox edge.
+  const marginX = (box.x1 - box.x0) * 0.06;
+  const marginTop = (box.y1 - box.y0) * 0.06;
+  const marginBottom = (box.y1 - box.y0) * 0.16;
+  svg.setAttribute(
+    "viewBox",
+    `${box.x0 - marginX} ${-(box.y1 + marginTop)} ${box.x1 - box.x0 + 2 * marginX} ${box.y1 - box.y0 + marginTop + marginBottom}`
+  );
+
+  const stepX = niceStep(box.x1 - box.x0);
+  const stepY = niceStep(box.y1 - box.y0);
+  drawGrid(svg, box, stepX, stepY);
 
   const g = document.createElementNS(SVG_NS, "g");
   g.setAttribute("transform", "scale(1,-1)");
@@ -461,6 +555,8 @@ function drawView(svg, frame, box) {
     path.appendChild(title);
     g.appendChild(path);
   }
+
+  drawAxisLabels(svg, box, stepX, stepY);
 }
 
 function wireEvents() {
@@ -492,6 +588,16 @@ function wireEvents() {
   for (const id of ["zoom-x0", "zoom-x1", "zoom-y0", "zoom-y1"]) {
     $(id).addEventListener("change", drawZoomView);
   }
+
+  $("open-recipes-btn").addEventListener("click", () => openModal("modal-recipes"));
+  $("open-follow-btn").addEventListener("click", () => openModal("modal-follow"));
+  document.querySelectorAll("[data-close-modal]").forEach((btn) => btn.addEventListener("click", closeModals));
+  $("modal-backdrop").addEventListener("click", (e) => {
+    if (e.target.id === "modal-backdrop") closeModals();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeModals();
+  });
 }
 
 async function init() {
