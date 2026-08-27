@@ -7,8 +7,8 @@ from structureforge.api.app import create_app  # noqa: E402
 
 
 @pytest.fixture
-def client():
-    return TestClient(create_app())
+def client(tmp_path):
+    return TestClient(create_app(recipes_file=tmp_path / "recipes.json"))
 
 
 def test_list_materials(client):
@@ -23,6 +23,50 @@ def test_list_recipes(client):
     assert response.status_code == 200
     body = response.json()
     assert {r["name"] for r in body["etch"]} >= {"Dry Oxide Etch", "Anisotropic RIE"}
+    assert all(r["is_custom"] is False for r in body["etch"])  # nothing custom saved yet
+
+
+def test_add_list_and_delete_a_custom_deposition_recipe(client):
+    recipe = {"name": "Mon depot maison", "mode": "conformal", "angle_deg": 0.0, "notes": "test"}
+
+    response = client.post("/api/recipes/deposition", json=recipe)
+    assert response.status_code == 200
+    deposition = {r["name"]: r for r in response.json()["deposition"]}
+    assert deposition["Mon depot maison"]["is_custom"] is True
+
+    listed = client.get("/api/recipes").json()
+    assert any(r["name"] == "Mon depot maison" for r in listed["deposition"])
+
+    response = client.delete("/api/recipes/deposition/Mon depot maison")
+    assert response.status_code == 200
+    assert not any(r["name"] == "Mon depot maison" for r in response.json()["deposition"])
+
+
+def test_custom_recipe_persists_across_app_instances(tmp_path):
+    recipes_file = tmp_path / "recipes.json"
+    first = TestClient(create_app(recipes_file=recipes_file))
+    first.post(
+        "/api/recipes/etch",
+        json={"name": "Ma gravure maison", "mode": "isotropic", "default_factor": 0.42},
+    )
+
+    second = TestClient(create_app(recipes_file=recipes_file))
+    listed = second.get("/api/recipes").json()
+    custom = next(r for r in listed["etch"] if r["name"] == "Ma gravure maison")
+    assert custom["default_factor"] == 0.42
+    assert custom["is_custom"] is True
+
+
+def test_custom_recipe_can_override_a_built_in_by_name(client):
+    client.post(
+        "/api/recipes/deposition",
+        json={"name": "ALD Conformal", "mode": "conformal", "notes": "overridden"},
+    )
+
+    listed = client.get("/api/recipes").json()
+    ald = next(r for r in listed["deposition"] if r["name"] == "ALD Conformal")
+    assert ald["notes"] == "overridden"
+    assert ald["is_custom"] is True
 
 
 def test_simulate_end_to_end(client):

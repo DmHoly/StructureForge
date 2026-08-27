@@ -34,6 +34,7 @@ async function loadLibraries() {
 
   $("dep-recipe").innerHTML = optionsHtml(recipes.deposition.map((r) => r.name));
   $("etch-recipe").innerHTML = optionsHtml(recipes.etch.map((r) => r.name));
+  renderRecipeLists();
 }
 
 function switchStepKindFields() {
@@ -215,6 +216,168 @@ async function exportToFollow() {
   showFollowMessage("success", `Experience Follow ${data.experiment_id} committee sur la branche "${data.branch}".`);
 }
 
+const RECIPE_MODES = {
+  deposition: ["conformal", "directional"],
+  etch: ["isotropic", "directional"],
+};
+
+function populateRecipeModeOptions() {
+  const kind = $("recipe-kind").value;
+  $("recipe-mode").innerHTML = optionsHtml(RECIPE_MODES[kind]);
+  switchRecipeFormFields();
+}
+
+function switchRecipeFormFields() {
+  const kind = $("recipe-kind").value;
+  const mode = $("recipe-mode").value;
+  $("recipe-angle-wrap").style.display = mode === "directional" ? "flex" : "none";
+  $("recipe-etch-fields").classList.toggle("active", kind === "etch");
+}
+
+function parseFactorMap(text) {
+  const out = {};
+  for (const part of text.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const [name, factor] = part.split(":").map((s) => s.trim());
+    if (name && factor !== undefined) out[name] = parseFloat(factor);
+  }
+  return out;
+}
+
+function factorMapToText(map) {
+  return Object.entries(map || {}).map(([k, v]) => `${k}:${v}`).join(", ");
+}
+
+function buildRecipeFromForm() {
+  const kind = $("recipe-kind").value;
+  const name = $("recipe-name").value.trim();
+  if (!name) throw new Error("Le nom de la recette est obligatoire.");
+  const mode = $("recipe-mode").value;
+  const angle_deg = mode === "directional" ? parseFloat($("recipe-angle").value) : 0.0;
+  const notes = $("recipe-notes").value.trim() || null;
+
+  if (kind === "deposition") {
+    return { name, mode, angle_deg, notes };
+  }
+  return {
+    name,
+    mode,
+    angle_deg,
+    default_factor: parseFloat($("recipe-default-factor").value),
+    selectivity_by_material: parseFactorMap($("recipe-sel-material").value),
+    selectivity_by_category: parseFactorMap($("recipe-sel-category").value),
+    notes,
+  };
+}
+
+function clearRecipeForm() {
+  $("recipe-name").value = "";
+  $("recipe-angle").value = "0";
+  $("recipe-default-factor").value = "1.0";
+  $("recipe-sel-material").value = "";
+  $("recipe-sel-category").value = "";
+  $("recipe-notes").value = "";
+  populateRecipeModeOptions();
+}
+
+function loadRecipeIntoForm(kind, recipe) {
+  $("recipe-kind").value = kind;
+  populateRecipeModeOptions();
+  $("recipe-name").value = recipe.name;
+  $("recipe-mode").value = recipe.mode;
+  $("recipe-angle").value = recipe.angle_deg;
+  if (kind === "etch") {
+    $("recipe-default-factor").value = recipe.default_factor;
+    $("recipe-sel-material").value = factorMapToText(recipe.selectivity_by_material);
+    $("recipe-sel-category").value = factorMapToText(recipe.selectivity_by_category);
+  }
+  $("recipe-notes").value = recipe.notes || "";
+  switchRecipeFormFields();
+}
+
+function showRecipeMessage(kind, message) {
+  const errorEl = $("recipe-error");
+  const successEl = $("recipe-success");
+  errorEl.hidden = true;
+  successEl.hidden = true;
+  if (!message) return;
+  const el = kind === "error" ? errorEl : successEl;
+  el.hidden = false;
+  el.textContent = message;
+}
+
+function renderRecipeLists() {
+  for (const kind of ["deposition", "etch"]) {
+    const list = $(`recipe-list-${kind}`);
+    list.innerHTML = "";
+    for (const recipe of state.recipes[kind]) {
+      const li = document.createElement("li");
+      const angleText = recipe.mode === "directional" ? ` - ${recipe.angle_deg}deg` : "";
+      const badgeClass = recipe.is_custom ? "badge custom" : "badge";
+      const badgeText = recipe.is_custom ? "personnalisee" : "integree";
+      li.innerHTML = `
+        <div class="recipe-row">
+          <strong>${recipe.name}</strong>
+          <span class="${badgeClass}">${badgeText}</span>
+        </div>
+        <span>${recipe.mode}${angleText}</span>
+      `;
+      li.addEventListener("click", () => loadRecipeIntoForm(kind, recipe));
+      if (recipe.is_custom) {
+        const delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.textContent = "Supprimer";
+        delBtn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          deleteRecipe(kind, recipe.name).catch((err) => showRecipeMessage("error", String(err)));
+        });
+        li.appendChild(delBtn);
+      }
+      list.appendChild(li);
+    }
+  }
+}
+
+async function saveRecipe() {
+  showRecipeMessage(null);
+  const kind = $("recipe-kind").value;
+  let body;
+  try {
+    body = buildRecipeFromForm();
+  } catch (err) {
+    showRecipeMessage("error", String(err));
+    return;
+  }
+  const response = await fetch(`/api/recipes/${kind}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    showRecipeMessage("error", data.detail ? JSON.stringify(data.detail) : "Erreur d'enregistrement");
+    return;
+  }
+  state.recipes = data;
+  renderRecipeLists();
+  $("dep-recipe").innerHTML = optionsHtml(data.deposition.map((r) => r.name));
+  $("etch-recipe").innerHTML = optionsHtml(data.etch.map((r) => r.name));
+  showRecipeMessage("success", `Recette "${body.name}" enregistree.`);
+}
+
+async function deleteRecipe(kind, name) {
+  const response = await fetch(`/api/recipes/${kind}/${encodeURIComponent(name)}`, { method: "DELETE" });
+  const data = await response.json();
+  if (!response.ok) {
+    showRecipeMessage("error", data.detail ? JSON.stringify(data.detail) : "Erreur de suppression");
+    return;
+  }
+  state.recipes = data;
+  renderRecipeLists();
+  $("dep-recipe").innerHTML = optionsHtml(data.deposition.map((r) => r.name));
+  $("etch-recipe").innerHTML = optionsHtml(data.etch.map((r) => r.name));
+  showRecipeMessage("success", `Recette "${name}" supprimee.`);
+}
+
 function computeGlobalBounds(frames) {
   let x0 = 0, x1 = 0, y0 = 0, y1 = 0;
   let any = false;
@@ -318,6 +481,12 @@ function wireEvents() {
   $("export-follow-btn").addEventListener("click", () => {
     exportToFollow().catch((err) => showFollowMessage("error", String(err)));
   });
+  $("recipe-kind").addEventListener("change", populateRecipeModeOptions);
+  $("recipe-mode").addEventListener("change", switchRecipeFormFields);
+  $("save-recipe-btn").addEventListener("click", () => {
+    saveRecipe().catch((err) => showRecipeMessage("error", String(err)));
+  });
+  $("clear-recipe-form-btn").addEventListener("click", clearRecipeForm);
   $("frame-slider").addEventListener("input", (e) => setFrame(parseInt(e.target.value, 10)));
   $("zoom-fit-btn").addEventListener("click", fitZoomToStructure);
   for (const id of ["zoom-x0", "zoom-x1", "zoom-y0", "zoom-y1"]) {
@@ -329,6 +498,7 @@ async function init() {
   wireEvents();
   switchStepKindFields();
   switchPlanarizationMode();
+  populateRecipeModeOptions();
   await loadLibraries();
 }
 

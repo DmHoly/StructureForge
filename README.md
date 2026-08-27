@@ -70,6 +70,34 @@ Ouvrir `http://127.0.0.1:8000`. On choisit le substrat, on ajoute des étapes un
 d'ensemble sur tout le domaine, vue zoomée sur une zone qu'on définit numériquement ou via
 « Cadrer sur la structure ») se mettent à jour ensemble, à chaque étape.
 
+## Gestionnaire de recettes
+
+Le panneau **Gestionnaire de recettes** de la GUI liste toutes les recettes disponibles (badge
+« intégrée » ou « personnalisée ») et permet d'en créer/modifier/supprimer : type (dépôt/gravure),
+mode, angle, facteur par défaut et tables de sélectivité (`nom:facteur, ...` par matériau ou par
+catégorie), notes. Cliquer sur une recette existante charge ses valeurs dans le formulaire pour la
+dupliquer ou la retoucher. Une recette personnalisée porte le même nom qu'une recette intégrée ?
+Elle la **remplace** (la retirer restaure l'originale) - c'est le même mécanisme que
+`RecipeLibrary.with_recipes`. Toute recette ajoutée devient immédiatement utilisable dans le
+constructeur d'étapes, et reste disponible d'une session à l'autre : elle est persistée en JSON
+(par défaut `./structureforge_recipes.json`, chemin personnalisable via `structureforge
+--recipes-file mes_recettes.json` ou la variable d'environnement `STRUCTUREFORGE_RECIPES_FILE`).
+
+Côté Python, c'est `structureforge.core.recipe_store.RecipeStore` :
+
+```python
+from structureforge.core.recipe_store import RecipeStore
+from structureforge.core.recipes import EtchMode, EtchRecipe, default_recipes
+
+store = RecipeStore("mes_recettes.json")
+store.upsert_etch(EtchRecipe(
+    name="Ma gravure maison", mode=EtchMode.isotropic,
+    selectivity_by_material={"Si": 1.0, "SiO2": 0.1}, default_factor=0.3,
+))
+
+recipes = store.combined_with(default_recipes())  # bibliotheque de base + tout le contenu du store
+```
+
 ## Exporter vers Follow
 
 `structureforge.adapters.follow_adapter` convertit une géométrie simulée et son historique de
@@ -173,7 +201,8 @@ dédié : tout ce qui n'est plus connecté au substrat après le retrait de la r
 
 ```
 structureforge/
-  core/           unites (Length), materiaux (Material/MaterialLibrary), recettes (DepositionRecipe/EtchRecipe)
+  core/           unites (Length), materiaux (Material/MaterialLibrary), recettes (DepositionRecipe/EtchRecipe),
+                  RecipeStore (recettes personnalisees persistees en JSON)
   geometry/       le moteur (Geometry/Layer, operations booleennes shapely)
   process/        les briques de process (ProcessStep) et simulate()
   presentation/   export SVG d'une Frame (script/notebook, sans la GUI)

@@ -41,3 +41,28 @@ def test_cl2_icp_rie_is_selective_to_the_iii_n_family(materials, recipes):
         assert recipe.factor_for(materials.get(name)) == 1.0
     assert recipe.factor_for(materials.get("PMMA")) == pytest.approx(0.05)
     assert recipe.factor_for(materials.get("Si")) == pytest.approx(0.05)  # not III-N, no override
+
+
+def test_sf6_deep_rie_stops_on_common_mask_materials(materials, recipes):
+    recipe = recipes.get_etch("SF6 Deep RIE (Si)")
+    assert recipe.factor_for(materials.get("Si")) == 1.0
+    for mask in ["SiO2", "Si3N4"]:
+        assert recipe.factor_for(materials.get(mask)) == pytest.approx(0.02)
+    assert recipe.factor_for(materials.get("Photoresist")) == pytest.approx(0.05)
+
+
+def test_wet_metal_etch_is_selective_by_category(materials, recipes):
+    recipe = recipes.get_etch("Wet Metal Etch")
+    for name in ["Al", "Cu", "Au", "W"]:
+        assert recipe.factor_for(materials.get(name)) == 1.0
+    assert recipe.factor_for(materials.get("SiO2")) == pytest.approx(0.05)
+
+
+def test_default_recipe_library_has_the_expected_names(recipes):
+    for name in ["ALD Conformal", "CVD Conformal", "PVD Sputter (tilted)", "Evaporation (normal)",
+                 "MOCVD Epitaxial", "PECVD Conformal", "Sputter Metal (normal)", "Electroplating (Cu)"]:
+        assert name in recipes.deposition
+    for name in ["Dry Oxide Etch", "Wet HF Dip", "Anisotropic RIE", "Ion Mill (tilted)",
+                 "KOH Anisotropic Wet Etch", "Cl2 ICP-RIE (III-N)", "TMAH Anisotropic Wet Etch",
+                 "SF6 Deep RIE (Si)", "Wet Metal Etch"]:
+        assert name in recipes.etch

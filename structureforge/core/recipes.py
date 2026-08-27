@@ -121,6 +121,22 @@ def default_recipes() -> RecipeLibrary:
                 "layer grown on an already-flat template."
             ),
         ),
+        DepositionRecipe(
+            name="PECVD Conformal",
+            mode=DepositionMode.conformal,
+            notes="Plasma-enhanced CVD - lower deposition temperature than thermal CVD, similar (good, not perfect) step coverage.",
+        ),
+        DepositionRecipe(
+            name="Sputter Metal (normal)",
+            mode=DepositionMode.directional,
+            angle_deg=0.0,
+            notes="Normal-incidence physical sputtering - better sidewall coverage than evaporation, still line-of-sight/directional.",
+        ),
+        DepositionRecipe(
+            name="Electroplating (Cu)",
+            mode=DepositionMode.conformal,
+            notes="Bottom-up electrochemical fill (Cu damascene interconnects) - modelled as conformal; needs a conductive seed layer already present in a real process, which this engine doesn't check for.",
+        ),
     ]
     etch = [
         EtchRecipe(
@@ -171,6 +187,32 @@ def default_recipes() -> RecipeLibrary:
             selectivity_by_material={"GaN": 1.0, "AlGaN": 1.0, "InGaN": 1.0, "AlN": 1.0},
             default_factor=0.05,
             notes="Near-vertical dry etch of the III-N family (GaN/AlGaN/InGaN/AlN); selective over masks/dielectrics/metals.",
+        ),
+        EtchRecipe(
+            name="TMAH Anisotropic Wet Etch",
+            mode=EtchMode.directional,
+            angle_deg=54.7,
+            selectivity_by_material={"Si": 1.0},
+            default_factor=0.02,
+            notes=(
+                "CMOS-compatible alternative to KOH (no alkali metal contamination) - same {111} "
+                "self-terminating angle, but noticeably gentler on exposed Al than KOH is."
+            ),
+        ),
+        EtchRecipe(
+            name="SF6 Deep RIE (Si)",
+            mode=EtchMode.directional,
+            angle_deg=0.0,
+            selectivity_by_material={"Si": 1.0, "SiO2": 0.02, "Si3N4": 0.02, "Photoresist": 0.05},
+            default_factor=1.0,
+            notes="Bosch-style deep silicon etch (through-silicon vias, MEMS) - near-vertical, high-rate, stops well on an oxide/nitride/resist mask.",
+        ),
+        EtchRecipe(
+            name="Wet Metal Etch",
+            mode=EtchMode.isotropic,
+            selectivity_by_category={MaterialCategory.metal: 1.0},
+            default_factor=0.05,
+            notes="Generic wet metal patterning etchant - attacks metals at the nominal rate, everything else slowly; undercuts under its mask like any isotropic etch.",
         ),
     ]
     return RecipeLibrary(deposition={r.name: r for r in deposition}, etch={r.name: r for r in etch})
