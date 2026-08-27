@@ -1,5 +1,5 @@
 import pytest
-from shapely.geometry import box
+from shapely.geometry import Point, box
 
 from structureforge.geometry.engine import Geometry, Layer
 
@@ -109,6 +109,41 @@ def test_planarize_requires_exactly_one_target():
         g.planarize()
     with pytest.raises(ValueError, match="exactly one"):
         g.planarize(target_level_nm=5, stop_material="Si")
+
+
+def test_directional_deposit_shadows_a_mesas_own_leeward_face():
+    """A tilted beam (source up-and-left) should coat the mesa's illuminated (left) side and its
+    top, leave its leeward (right) face bare, and leave a shadowed gap on the substrate just
+    behind it before coating resumes further out where the shadow ends.
+    """
+    g = Geometry.substrate("Si", domain_width_nm=200, thickness_nm=20)
+    g.layers.append(Layer(material="W", polygon=box(80, 0, 120, 40)))
+    g.deposit_directional("Al", 15, angle_deg=30)
+
+    al = next(l for l in g.layers if l.material == "Al").polygon
+    assert al.contains(Point(75, 5))  # illuminated (left) side: coated
+    assert al.contains(Point(100, 45))  # mesa top: coated
+    assert not al.contains(Point(125, 5))  # leeward side, in the mesa's own shadow: bare
+    assert al.contains(Point(160, 5))  # far enough right that the shadow has ended: coated
+
+
+def test_directional_etch_protects_a_mesas_leeward_face_and_casts_a_shadow(materials, recipes):
+    """The dual of the deposit case: an illuminated face/substrate should recede normally, the
+    mesa's own leeward face should stay exactly where it was, and a shelf of un-etched substrate
+    should survive in its shadow before the normal etch depth resumes further out.
+    """
+    g = Geometry.substrate("Si", domain_width_nm=200, thickness_nm=20)
+    g.layers.append(Layer(material="W", polygon=box(80, 0, 120, 40)))
+    recipe = recipes.get_etch("Ion Mill (tilted)")
+    g.etch(recipe, depth_nm=15, materials=materials)
+
+    solid = g.solid()
+    assert not solid.contains(Point(75, -5))  # illuminated left: etched away
+    assert solid.contains(Point(122, -5))  # shadowed shelf right behind the mesa: still solid
+    assert not solid.contains(Point(160, -5))  # far right, beyond the shadow: etched away
+
+    tungsten = next(l for l in g.layers if l.material == "W").polygon
+    assert tungsten.bounds[2] == pytest.approx(120.0)  # leeward (right) face unmoved
 
 
 def test_lift_off_removes_metal_deposited_on_top_of_stripped_resist():

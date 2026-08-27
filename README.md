@@ -142,10 +142,15 @@ booléennes sur des polygones shapely plutôt que sur un champ de hauteur - choi
 représenter angles, conformité et cavités. Trois simplifications assumées pour cette v1, chacune
 documentée dans le code à l'endroit exact où elle s'applique :
 
-- **Pas d'ombrage entre motifs distincts.** Une gravure/dépôt directionnel gère correctement
-  l'auto-ombrage d'une même topologie (le flanc d'une tranchée s'ombrage bien lui-même), mais pas
-  le fait qu'un motif voisin plus haut puisse en masquer un autre plus bas. Un vrai ray-tracing
-  serait l'extension naturelle.
+- **L'ombrage directionnel est un test de silhouette dur, pas un vrai ray-tracer.** `Geometry._shadow`
+  balaie le solide courant vers l'avant le long du faisceau, assez loin pour couvrir toute la
+  structure, et soustrait ça du résultat brut d'un dépôt/gravure directionnel - c'est ce qui fait
+  qu'une face sous le vent d'un mesa, ou un motif plus court caché derrière un plus haut, restent
+  intacts au lieu d'être couverts/gravés comme si le faisceau traversait la matière. Ça reste une
+  simplification : pas d'ombre partielle/douce (le faisceau est soit totalement bloqué, soit pas
+  du tout - une vraie source n'est jamais ponctuelle), et pas d'effets secondaires (réflexion,
+  redéposition de matière pulvérisée). Les procédés isotropes n'ont pas de direction le long de
+  laquelle s'ombrager, donc ils ignorent complètement ce mécanisme, à raison.
 - **Les bords du domaine sont des frontières de symétrie**, pas des bords libres : tout
   buffer/balayage est calculé sur la géométrie reflétée en x=0 et x=largeur puis recadré, pour
   éviter un arrondi/une érosion artificiels pile sur le bord. Garder le domaine assez large pour

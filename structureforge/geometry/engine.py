@@ -97,11 +97,15 @@ class Geometry:
 
     Known v1 simplifications, documented once here rather than scattered through the methods:
 
-    - **No inter-feature shadowing.** Directional deposition/etch handle a feature's own local
-      topology correctly (a trench self-shadows its own sidewall, via the sweep construction) but
-      not a *separate* taller feature blocking a shorter one next to it. Real tools ray-trace
-      this; it's a natural place to extend the engine, not something v1 gets wrong silently -
-      it's a scope cut.
+    - **Directional shadowing is a hard, single-bounce silhouette test, not a ray tracer.**
+      `_shadow` sweeps the current solid forward along the beam direction, far enough to span the
+      structure, and subtracts that from a directional deposit/etch's raw result - this is what
+      makes a mesa's own leeward face, and a shorter feature standing behind a taller one, stay
+      untouched instead of being coated/etched as if the beam passed straight through solid
+      matter. It's still a simplification: no partial/soft shadows (a beam is either fully blocked
+      or not - real sources aren't perfect points), and no secondary effects (reflection,
+      redeposition of sputtered material). Isotropic processes have no direction to shadow along,
+      so they ignore this entirely, as they should.
     - **Domain edges are symmetry boundaries, not free edges.** Every buffer/sweep operates on the
       geometry mirrored across `x=0` and `x=domain_width_nm` and is cropped back afterwards, so a
       feature near the edge behaves as if the pattern repeats past the boundary instead of
@@ -197,6 +201,21 @@ class Geometry:
             extended.append(unary_union([part, above]))
         return _clean(unary_union(extended))
 
+    def _shadow(self, padded_solid: BaseGeometry, angle_deg: float, y_min: float, y_max: float) -> BaseGeometry:
+        """The region shadowed by `padded_solid` for a beam tilted `angle_deg`: everywhere "behind"
+        existing material, continuing in the beam's own forward direction, out to a length that
+        safely spans the current structure. A directional process (deposition or etch) can't
+        affect anything back there - which is what makes a feature's own leeward face, and a
+        shorter feature standing behind a taller one, correctly stay untouched instead of being
+        coated/etched as if the beam went straight through solid matter to reach them.
+        """
+        if padded_solid.is_empty:
+            return padded_solid
+        span = (y_max - y_min) + self.domain_width_nm + _MARGIN
+        dx, dy = beam_vector(angle_deg, span)
+        swept = sweep_union(padded_solid, (dx, dy), steps=64)
+        return swept.difference(padded_solid)
+
     def _domain_box(self, y_min: float, y_max: float) -> BaseGeometry:
         return box(0.0, y_min, self.domain_width_nm, y_max)
 
@@ -234,7 +253,9 @@ class Geometry:
 
     def deposit_directional(self, material: str, thickness_nm: float, angle_deg: float) -> None:
         """Line-of-sight deposition from one direction (PVD/evaporation-like): grows the solid by
-        sweeping it towards the source (the beam's arrival direction, reversed).
+        sweeping it towards the source (the beam's arrival direction, reversed), then removes
+        whatever growth would have landed in another feature's shadow (including a feature's own
+        leeward face) - see `_shadow`.
         """
         if thickness_nm <= 0:
             return
@@ -243,7 +264,9 @@ class Geometry:
         dx, dy = beam_vector(angle_deg, thickness_nm)
         padded = self._pad(solid)
         swept = sweep_union(padded, (-dx, -dy))
-        film = self._crop(swept.difference(padded), y_min - thickness_nm, y_max + thickness_nm)
+        film_raw = swept.difference(padded)
+        shadow = self._shadow(padded, angle_deg, y_min, y_max)
+        film = self._crop(film_raw.difference(shadow), y_min - thickness_nm, y_max + thickness_nm)
         if not film.is_empty:
             self.layers.append(Layer(material=material, polygon=film))
 
@@ -292,8 +315,17 @@ class Geometry:
             # Padded (mirrored + bulk-extended) once per substep: used below to test whether a
             # layer is exposed to the *true* surface, without the wafer floor or the domain's
             # left/right edges - which are real edges of the raw `solid` polygon but not real
-            # exposure - registering as false positives.
-            padded_solid_boundary = self._pad(solid).boundary
+            # exposure - registering as false positives. Also the basis for this substep's
+            # shadow (directional mode only) - computed from the *plain* solid, never the
+            # per-factor guard (which deliberately makes a mask look near-infinitely thick and
+            # would cast a wildly oversized false shadow if used here).
+            padded_plain = self._pad(solid)
+            padded_solid_boundary = padded_plain.boundary
+            shadow = (
+                self._shadow(padded_plain, recipe.angle_deg, y_min, y_max)
+                if recipe.mode is EtchMode.directional
+                else None
+            )
 
             factor_by_index: dict[int, float] = {}
             for i, layer in enumerate(self.layers):
@@ -333,7 +365,7 @@ class Geometry:
                     air_bbox = box(px0 - 1.0, y_min - substep * factor - _MARGIN, px1 + 1.0, y_max + _MARGIN)
                     air = air_bbox.difference(padded)
                     swept_air = sweep_union(air, (dx, dy))
-                    ring = padded.intersection(swept_air)
+                    ring = padded.intersection(swept_air).difference(shadow)
                 ring_by_factor[factor] = self._crop(ring, y_min - substep - _MARGIN, y_max + _MARGIN)
 
             removed_parts = [
