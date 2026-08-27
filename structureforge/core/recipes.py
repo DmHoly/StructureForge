@@ -214,5 +214,22 @@ def default_recipes() -> RecipeLibrary:
             default_factor=0.05,
             notes="Generic wet metal patterning etchant - attacks metals at the nominal rate, everything else slowly; undercuts under its mask like any isotropic etch.",
         ),
+        EtchRecipe(
+            name="GaN V-pit Etch",
+            mode=EtchMode.isotropic,
+            selectivity_by_material={"GaN": 1.0, "AlGaN": 1.0, "InGaN": 1.0, "AlN": 1.0},
+            default_factor=0.05,
+            notes=(
+                "A real V-pit forms by growth (not etching) that self-terminates on two "
+                "symmetric {1-101} semipolar facets, giving a sharp-walled cone; this engine's "
+                "directional recipes model a single tilted beam rather than two symmetric "
+                "self-terminating facets, so the closest reproducible stand-in for a symmetric "
+                "pit is an isotropic undercut under a narrow mask opening - rounded rather than "
+                "sharp-faceted, but the right topology (wide at the surface, narrowing towards a "
+                "point below) to cut down through an already-grown, otherwise flat III-N "
+                "multilayer stack. GaN/AlGaN/InGaN/AlN all etch at the same nominal rate, a mask "
+                "stays mostly put."
+            ),
+        ),
     ]
     return RecipeLibrary(deposition={r.name: r for r in deposition}, etch={r.name: r for r in etch})
