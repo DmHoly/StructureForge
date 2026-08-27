@@ -70,6 +70,10 @@ Ouvrir `http://127.0.0.1:8000`. On choisit le substrat, on ajoute des étapes un
 d'ensemble sur tout le domaine, vue zoomée sur une zone qu'on définit numériquement ou via
 « Cadrer sur la structure ») se mettent à jour ensemble, à chaque étape.
 
+Voir [docs/interface.md](docs/interface.md) pour une visite guidée de l'interface avec captures
+d'écran (barre latérale, vues multi-échelle avec grille/axes, gestionnaire de recettes, export
+Follow).
+
 ## Gestionnaire de recettes
 
 Le panneau **Gestionnaire de recettes** de la GUI liste toutes les recettes disponibles (badge
