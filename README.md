@@ -54,9 +54,13 @@ masque, gravure, remplissage, CMP), `examples/nanowire_pzgan.py` (empilement GaN
 gravé en réseau de nanofils par lithographie EBL (masque PMMA) + gravure Cl2 ICP-RIE sélective -
 le cas multi-échelle qui a motivé le projet), `examples/koh_v_groove.py` (gravure humide KOH
 anisotrope du silicium, auto-limitée sur les plans {111} à 54.7° - démontre l'ombrage directionnel
-sur une cavité qui se referme) et `examples/vpit_led.py` (stack LED III-N - superréseaux, puits
+sur une cavité qui se referme), `examples/vpit_led.py` (stack LED III-N - superréseaux, puits
 quantiques multiples, EBL, p-GaN - avec un V-pit nucléé sur une dislocation traversante, ouvert à
-travers les puits quantiques puis refermé par une couche de capping (VCL)).
+travers les puits quantiques puis refermé par une couche de capping (VCL)) et
+`examples/nanowire_semipolar_tip.py` (nanofil GaN à croissance sélective, gravé en pilier puis
+terminé par une pointe à facettes semi-polaires {1-101} - un "V-pit à l'envers", les mêmes plans
+sur un mesa convexe au lieu d'une cavité concave - avant que la croissance ne reprenne à plat sur
+le plan c retréci : puits quantique, capot, contact ITO).
 
 ## Interface graphique web
 
