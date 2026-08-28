@@ -220,15 +220,15 @@ def default_recipes() -> RecipeLibrary:
             selectivity_by_material={"GaN": 1.0, "AlGaN": 1.0, "InGaN": 1.0, "AlN": 1.0},
             default_factor=0.05,
             notes=(
-                "A real V-pit forms by growth (not etching) that self-terminates on two "
-                "symmetric {1-101} semipolar facets, giving a sharp-walled cone; this engine's "
+                "A real V-pit nucleates spontaneously at a threading dislocation and opens up on "
+                "two symmetric self-terminating {1-101} semipolar facets; this engine's "
                 "directional recipes model a single tilted beam rather than two symmetric "
-                "self-terminating facets, so the closest reproducible stand-in for a symmetric "
-                "pit is an isotropic undercut under a narrow mask opening - rounded rather than "
-                "sharp-faceted, but the right topology (wide at the surface, narrowing towards a "
-                "point below) to cut down through an already-grown, otherwise flat III-N "
-                "multilayer stack. GaN/AlGaN/InGaN/AlN all etch at the same nominal rate, a mask "
-                "stays mostly put."
+                "facets, so the closest reproducible stand-in is a small symmetric isotropic "
+                "undercut - rounded rather than sharp-faceted - that seeds one localized notch. "
+                "Etch it once, right where the dislocation would sit, *before* growing the "
+                "layers above: ordinary conformal deposition then drapes each subsequent layer "
+                "over the notch's sidewall on its own, narrowing it further with every period, "
+                "until a thick enough capping layer coalesces over what's left."
             ),
         ),
     ]
