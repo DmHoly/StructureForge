@@ -70,3 +70,50 @@ def test_export_experiment_commits_and_round_trips(tmp_path, materials, recipes)
     # a second repository instance opened from the same path sees the same committed experiment
     reopened = follow.Repository(tmp_path / "mon_labo")
     assert [e.id for e in reopened.log("main")] == [experiment.id]
+
+
+def test_build_experiment_returns_uncommitted_builder(tmp_path, materials, recipes):
+    from structureforge.process.simulate import simulate
+
+    geometry = Geometry.substrate("Si", domain_width_nm=100, thickness_nm=20)
+    flow = _flow()
+    simulate(geometry, flow, materials, recipes)
+
+    repo = follow.Repository(tmp_path / "mon_labo")
+    builder = follow_adapter.build_experiment(repo, geometry, flow, branch="main", title="Essai", intent="Verifier")
+
+    assert len(repo) == 0  # nothing committed yet
+    builder.metadata["structureforge_process"] = {"note": "brut avant commit"}
+    experiment = builder.commit()
+
+    assert len(repo) == 1
+    assert experiment.metadata["structureforge_process"] == {"note": "brut avant commit"}
+
+
+def test_derive_experiment_replaces_structure_and_steps(tmp_path, materials, recipes):
+    from structureforge.process.simulate import simulate
+
+    geometry = Geometry.substrate("Si", domain_width_nm=100, thickness_nm=20)
+    flow = _flow()
+    simulate(geometry, flow, materials, recipes)
+
+    repo = follow.Repository(tmp_path / "mon_labo")
+    parent = follow_adapter.export_experiment(repo, geometry, flow, branch="main", title="Essai", intent="Verifier")
+
+    evolved_geometry = Geometry.substrate("Si", domain_width_nm=100, thickness_nm=20)
+    evolved_flow = _flow() + [Etch(name="Sur-gravure", recipe="Anisotropic RIE", depth=Length.nm(5))]
+    simulate(evolved_geometry, evolved_flow, materials, recipes)
+
+    builder = follow_adapter.derive_experiment(
+        repo, parent.id, evolved_geometry, evolved_flow, title="Essai v2", intent="Affiner"
+    )
+    experiment = builder.commit()
+
+    assert experiment.parents == [parent.id]
+    assert len(experiment.steps) == 4
+    assert experiment.branch == parent.branch  # no new_branch given, continues the same branch
+
+    rehydrated = follow.Structure.resolve(experiment.structure_type).model_validate(experiment.structure)
+    assert rehydrated.domain_width_nm == 100.0
+    baseline_refs = [r for r in experiment.references if r.role == "baseline"]
+    assert baseline_refs and baseline_refs[0].experiment_id == parent.id
