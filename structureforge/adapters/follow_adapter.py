@@ -115,3 +115,64 @@ def export_experiment(
         **experiment_kwargs,
     )
     return builder.commit()
+
+
+def build_experiment(
+    repo: "follow.Repository",
+    geometry: Geometry,
+    process_steps: list[ProcessStep],
+    *,
+    branch: str,
+    title: str,
+    intent: str,
+    **experiment_kwargs: Any,
+) -> "follow.ExperimentBuilder":
+    """Like `export_experiment`, but returns the uncommitted `ExperimentBuilder` instead of
+    committing it - for a caller that needs to set more on the builder first (`metadata`,
+    `evidence`, a `commit_form` answer...) before calling `.commit()` itself.
+    """
+    structure = to_structure(geometry)
+    steps = to_steps(process_steps)
+    return repo.new(
+        branch=branch,
+        structure=structure,
+        title=title,
+        intent=intent,
+        steps=steps,
+        **experiment_kwargs,
+    )
+
+
+def derive_experiment(
+    repo: "follow.Repository",
+    ref: str,
+    geometry: Geometry,
+    process_steps: list[ProcessStep],
+    *,
+    title: str,
+    intent: str,
+    new_branch: str | None = None,
+    **experiment_kwargs: Any,
+) -> "follow.ExperimentBuilder":
+    """The evolution equivalent of `build_experiment`: branch off `ref` (see
+    `follow.Repository.derive`) with `geometry`/`process_steps` as the new state, rather than
+    carrying the parent's structure/steps forward unchanged. Returns the uncommitted builder -
+    call `.commit()` once any extra metadata/evidence is set on it.
+
+    `carry_steps` is always overridden to `False`: the new `process_steps` replace the parent's
+    protocol outright, the same way `structure` does, since both come from the same re-simulation.
+    """
+    structure = to_structure(geometry)
+    steps = to_steps(process_steps)
+    experiment_kwargs.pop("carry_steps", None)
+    builder = repo.derive(
+        ref,
+        title=title,
+        intent=intent,
+        new_branch=new_branch,
+        structure=structure,
+        carry_steps=False,
+        **experiment_kwargs,
+    )
+    builder.steps = steps
+    return builder
