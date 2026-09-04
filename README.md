@@ -60,7 +60,12 @@ travers les puits quantiques puis refermé par une couche de capping (VCL)) et
 `examples/nanowire_semipolar_tip.py` (nanofil GaN à croissance sélective, gravé en pilier puis
 terminé par une pointe à facettes semi-polaires {1-101} - un "V-pit à l'envers", les mêmes plans
 sur un mesa convexe au lieu d'une cavité concave - avant que la croissance ne reprenne à plat sur
-le plan c retréci : puits quantique, capot, contact ITO).
+le plan c retréci : puits quantique, capot, contact ITO) et `examples/nanowire_axial.py` (un seul
+nanofil III-N **axial** : tampon AlN, tige n-GaN, puits quantiques multiples InGaN/GaN, blocage
+d'électrons AlGaN, segment p-GaN puis contact Ni/Au, tous empilés le long de l'axe du fil - obtenu,
+comme les deux exemples précédents, en faisant croître tout l'empilement à plat puis en gravant un
+seul pilier au travers, pas par une vraie croissance sélective localisée dans une ouverture de
+masque, que ce moteur ne modélise pas).
 
 ## Interface graphique web
 
