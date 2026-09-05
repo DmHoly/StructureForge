@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from ..core.materials import MaterialLibrary
 from ..core.recipes import RecipeLibrary
 from ..geometry.engine import Geometry, Layer
-from .steps import ChemicalStep, Deposition, EpitaxialGrowth, FacetedGrowth, Etch, Lithography, Planarization, ProcessStep, ResistStrip
+from .steps import ChemicalStep, Deposition, EpitaxialGrowth, FacetedGrowth, Etch, Flip, Lithography, Planarization, ProcessStep, ResistStrip
 
 
 class SimulationError(RuntimeError):
@@ -115,5 +115,7 @@ def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, re
             semi_polar_angle_deg=step.semi_polar_angle_deg,
             seed_materials=list(step.seed_materials) if step.seed_materials else None,
         )
+    elif isinstance(step, Flip):
+        geometry.flip()
     else:  # pragma: no cover - exhaustive over ProcessStep's Union
         raise TypeError(f"unknown step type {type(step).__name__}")

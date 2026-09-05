@@ -23,6 +23,45 @@ def test_wafer_floor_stops_deposition_and_etch_from_touching_the_backside():
     assert g.bounds()[1] == -30.0  # bottom untouched, only the top grew
 
 
+def test_flip_mirrors_the_stack_and_keeps_the_same_bounds():
+    g = Geometry.substrate("Si", domain_width_nm=100, thickness_nm=30)
+    g.deposit_conformal("SiO2", 20)
+    bounds_before = g.bounds()
+
+    g.flip()
+
+    assert g.bounds() == pytest.approx(bounds_before)
+    # the oxide grown on top is now at the bottom (bonded to the carrier), the substrate on top
+    oxide = next(l for l in g.layers if l.material == "SiO2")
+    si = next(l for l in g.layers if l.material == "Si")
+    assert oxide.polygon.bounds[1] == pytest.approx(bounds_before[1])
+    assert si.polygon.bounds[3] == pytest.approx(bounds_before[3])
+
+
+def test_flip_twice_returns_to_the_original_geometry():
+    g = Geometry.substrate("Si", domain_width_nm=100, thickness_nm=30)
+    g.deposit_conformal("SiO2", 20)
+    original_areas = {l.material: l.polygon.area for l in g.layers}
+
+    g.flip()
+    g.flip()
+
+    assert {l.material: pytest.approx(l.polygon.area, abs=1e-6) for l in g.layers} == pytest.approx(original_areas)
+
+
+def test_flip_rejects_a_non_flat_front_surface():
+    """An isolated raised feature narrower than the domain (e.g. a lift-off metal plot) leaves
+    gaps beside it at the top - flipping that wouldn't actually bond down anything in those gaps,
+    so it must be rejected rather than silently mirroring a shape nothing could physically
+    produce.
+    """
+    g = Geometry.substrate("Si", domain_width_nm=200, thickness_nm=30)
+    g.layers.append(Layer(material="Au", polygon=box(80, 0, 120, 15)))
+
+    with pytest.raises(ValueError, match="flat"):
+        g.flip()
+
+
 def test_masked_anisotropic_etch_protects_oxide_under_a_thin_resist_mask(materials, recipes):
     """The scenario that originally exposed the "thin mask tunnelled through" bug: a resist mask
     thinner than a single substep's depth for the faster (oxide/Si) rate must still fully protect
