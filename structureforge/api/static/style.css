@@ -613,3 +613,13 @@ button.ghost:hover {
   border-top: 1px solid var(--border);
   padding-top: var(--space-3);
 }
+
+/* -- epitaxial growth hint -------------------------------------------- */
+
+.epi-hint {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-style: italic;
+  line-height: 1.4;
+}

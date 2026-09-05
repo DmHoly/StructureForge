@@ -37,11 +37,12 @@ async function loadLibraries() {
   for (const m of materials) state.materialColors[m.name] = m.color;
 
   const materialNames = materials.map((m) => m.name);
-  for (const id of ["substrate-material", "dep-material", "pla-stop-material", "litho-material", "strip-material"]) {
+  for (const id of ["substrate-material", "dep-material", "epi-material", "pla-stop-material", "litho-material", "strip-material"]) {
     $(id).innerHTML = optionsHtml(materialNames);
   }
   $("litho-material").value = materialNames.includes("Photoresist") ? "Photoresist" : materialNames[0];
   $("strip-material").value = materialNames.includes("Photoresist") ? "Photoresist" : materialNames[0];
+  $("epi-material").value = materialNames.includes("GaN") ? "GaN" : materialNames[0];
 
   $("dep-recipe").innerHTML = optionsHtml(recipes.deposition.map((r) => r.name));
   $("etch-recipe").innerHTML = optionsHtml(recipes.etch.map((r) => r.name));
@@ -53,6 +54,11 @@ function switchStepKindFields() {
   for (const el of document.querySelectorAll(".step-fields")) {
     el.classList.toggle("active", el.id === `fields-${kind}`);
   }
+}
+
+function switchEpiOrientation() {
+  const orientation = $("epi-orientation").value;
+  $("epi-angle-wrap").style.display = orientation === "semi_polar" ? "flex" : "none";
 }
 
 function switchPlanarizationMode() {
@@ -108,6 +114,24 @@ function buildStepFromForm() {
   }
   if (kind === "resist_strip") {
     return { kind, name, material: $("strip-material").value };
+  }
+  if (kind === "epitaxial_growth") {
+    const orientation = $("epi-orientation").value;
+    const seedText = $("epi-seed-materials").value.trim();
+    const seedMaterials = seedText
+      ? seedText.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    const step = {
+      kind, name,
+      material: $("epi-material").value,
+      thickness: { value: parseFloat($("epi-thickness").value), unit: "nm" },
+      orientation,
+      seed_materials: seedMaterials,
+    };
+    if (orientation === "semi_polar") {
+      step.angle_deg = parseFloat($("epi-angle").value);
+    }
+    return step;
   }
   if (kind === "chemical") {
     return { kind, name, description: $("chem-description").value || null };
@@ -561,6 +585,7 @@ function drawView(svg, frame, box) {
 
 function wireEvents() {
   $("step-kind").addEventListener("change", switchStepKindFields);
+  $("epi-orientation").addEventListener("change", switchEpiOrientation);
   $("pla-mode").addEventListener("change", switchPlanarizationMode);
   $("add-step-btn").addEventListener("click", () => {
     try {
@@ -603,6 +628,7 @@ function wireEvents() {
 async function init() {
   wireEvents();
   switchStepKindFields();
+  switchEpiOrientation();
   switchPlanarizationMode();
   populateRecipeModeOptions();
   await loadLibraries();

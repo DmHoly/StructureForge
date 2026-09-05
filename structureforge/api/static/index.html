@@ -10,7 +10,7 @@
   <header class="topbar">
     <div class="topbar-heading">
       <h1>StructureForge</h1>
-      <p class="subtitle">Simulateur de process 2D (vue en coupe) - depot, gravure, planarisation, etapes chimiques</p>
+      <p class="subtitle">Simulateur de process 2D (vue en coupe) - depot, gravure, planarisation, croissance epitaxiale, etapes chimiques</p>
     </div>
     <div class="topbar-actions">
       <button id="open-recipes-btn" type="button" class="ghost">Recettes</button>
@@ -42,6 +42,7 @@
             <select id="step-kind">
               <option value="deposition">Depot</option>
               <option value="etch">Gravure</option>
+              <option value="epitaxial_growth">Croissance epitaxiale (SAG)</option>
               <option value="planarization">Planarisation</option>
               <option value="lithography">Lithographie (masque resine)</option>
               <option value="resist_strip">Retrait de resine</option>
@@ -72,6 +73,33 @@
           <label>Profondeur nominale (nm)
             <input id="etch-depth" type="number" value="20" min="0" step="0.1" />
           </label>
+        </div>
+
+        <div id="fields-epitaxial_growth" class="step-fields">
+          <div class="field-row">
+            <label>Materiau epitaxie
+              <select id="epi-material"></select>
+            </label>
+            <label>Epaisseur (nm)
+              <input id="epi-thickness" type="number" value="20" min="0" step="0.1" />
+            </label>
+          </div>
+          <div class="field-row">
+            <label>Orientation cristalline
+              <select id="epi-orientation">
+                <option value="c_plane">Plan C [0001] — vertical</option>
+                <option value="m_plane">Plan M {10-10} — lateral (sidewall)</option>
+                <option value="semi_polar">Semi-polaire — incline</option>
+              </select>
+            </label>
+            <label id="epi-angle-wrap" style="display:none">Angle (deg, depuis c-axe)
+              <input id="epi-angle" type="number" value="32" min="0.1" max="89.9" step="0.1" />
+            </label>
+          </div>
+          <label>Seed materials — SAG (noms separes par virgule, vide = pas de selectivite)
+            <input id="epi-seed-materials" type="text" placeholder="ex. GaN, AlN" />
+          </label>
+          <p class="epi-hint">Laisser vide pour une croissance non selective (buffer, template). Remplir pour bloquer la nucleation sur les masques.</p>
         </div>
 
         <div id="fields-planarization" class="step-fields">
