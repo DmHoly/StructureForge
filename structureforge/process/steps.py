@@ -109,6 +109,21 @@ class ResistStrip(BaseModel):
     material: str = "Photoresist"
 
 
+class Flip(BaseModel):
+    """Turn the wafer over to process its backside (thinning, through-substrate vias, backside
+    contacts): the current front is bonded face-down to a temporary carrier, and what was the
+    wafer's untouched bulk floor becomes the new front, ready for ordinary process steps to
+    continue on. See `structureforge.geometry.engine.Geometry.flip` for why this requires the
+    current front to be flat across the whole domain width first (a real temporary bond needs a
+    flat surface to adhere to).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["flip"] = "flip"
+    name: str
+
+
 class FacetedGrowth(BaseModel):
     """Multi-facet epitaxial growth driven by relative per-plane growth rates.
 
@@ -196,6 +211,16 @@ class EpitaxialGrowth(BaseModel):
 
 
 ProcessStep = Annotated[
-    Union[Deposition, Etch, Planarization, ChemicalStep, Lithography, ResistStrip, EpitaxialGrowth, FacetedGrowth],
+    Union[
+        Deposition,
+        Etch,
+        Planarization,
+        ChemicalStep,
+        Lithography,
+        ResistStrip,
+        EpitaxialGrowth,
+        FacetedGrowth,
+        Flip,
+    ],
     Field(discriminator="kind"),
 ]

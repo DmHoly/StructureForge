@@ -624,6 +624,49 @@ class Geometry:
             if not layer.polygon.is_empty:
                 layer.polygon = _drop_tiny(_clean(layer.polygon.intersection(new_solid)))
 
+    def flip(self) -> None:
+        """Turn the wafer over: mirror the whole stack vertically around the mid-height of the
+        current solid, so what was the top surface becomes the new bottom (bonded face-down to
+        a temporary carrier) and what was the untouched bulk floor becomes the new top, ready
+        for further process steps. `floor_nm` and the overall y-span are unchanged by
+        construction (the mirror axis is the solid's own mid-height) - only what used to be
+        "up" is now "down".
+
+        `self.layers` is reversed at the same time, so `layers[0]` keeps meaning "the anchor
+        `remove_floating_debris` treats as attached down" - after a flip that's whatever just
+        became the new bottom (bonded to the carrier), not the original substrate, which is now
+        floating freely at the new top like everything else.
+
+        Requires the current top surface to be flat across the *entire* domain width, the same
+        way a real temporary bond needs a flat surface to adhere to: raises `ValueError`
+        otherwise (e.g. an isolated raised feature wouldn't actually make contact with a carrier
+        across the gaps beside it - there'd be nothing physically holding those regions in place
+        once flipped).
+        """
+        solid = self.solid()
+        if solid.is_empty or self.floor_nm is None:
+            raise ValueError("flip: no substrate to flip")
+
+        y_min, y_max = solid.bounds[1], solid.bounds[3]
+        probe_height = min(0.5, y_max - y_min)
+        if probe_height <= 0:
+            raise ValueError("flip: geometry has no height to flip")
+        probe = self._crop(solid, y_max - probe_height, y_max)
+        expected_area = self.domain_width_nm * probe_height
+        flat = not probe.is_empty and abs(probe.area - expected_area) < 0.02 * expected_area
+        if not flat:
+            raise ValueError(
+                "flip: the front surface must be flat across the whole domain width before "
+                "flipping (e.g. planarize first) - like bonding the wafer to a temporary carrier"
+            )
+
+        mirror_axis = (y_min + y_max) / 2.0
+        flipped = []
+        for layer in reversed(self.layers):
+            polygon = layer.polygon if layer.polygon.is_empty else _clean(scale(layer.polygon, xfact=1.0, yfact=-1.0, origin=(0.0, mirror_axis)))
+            flipped.append(Layer(material=layer.material, polygon=polygon))
+        self.layers = flipped
+
     def remove_floating_debris(self) -> None:
         """Drop any part of the solid not connected down to the substrate (`layers[0]`). Called
         after a resist strip so material deposited on top of resist lifts off with it instead of

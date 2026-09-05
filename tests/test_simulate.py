@@ -3,7 +3,7 @@ import pytest
 from structureforge.core.units import Length
 from structureforge.geometry.engine import Geometry
 from structureforge.process.simulate import SimulationError, simulate
-from structureforge.process.steps import ChemicalStep, Deposition, Etch, ResistStrip
+from structureforge.process.steps import ChemicalStep, Deposition, Etch, Flip, Lithography, ResistStrip
 
 
 def _flow():
@@ -66,3 +66,27 @@ def test_resist_strip_triggers_lift_off_within_simulate(materials, recipes):
 
     assert "Photoresist" not in final_layers
     assert final_layers["Al"].polygon.area == pytest.approx(20 * 10, abs=1.0)
+
+
+def test_flip_step_flips_within_simulate_for_backside_processing(materials, recipes):
+    geometry = Geometry.substrate("Si", domain_width_nm=100, thickness_nm=30)
+    flow = [
+        Deposition(name="Metal avant", material="Au", recipe="Evaporation (normal)", thickness=Length.nm(20)),
+        Flip(name="Retournement"),
+        Deposition(name="Metal arriere", material="Ti", recipe="CVD Conformal", thickness=Length.nm(10)),
+    ]
+    frames = simulate(geometry, flow, materials, recipes)
+
+    assert [f.step_kind for f in frames[1:]] == ["deposition", "flip", "deposition"]
+
+
+def test_flip_step_rejects_a_non_flat_front_surface_within_simulate(materials, recipes):
+    geometry = Geometry.substrate("Si", domain_width_nm=200, thickness_nm=30)
+    flow = [
+        Lithography(name="Masque", resist_material="Photoresist", thickness=Length.nm(20), openings=[(80, 120)]),
+        Deposition(name="Plot", material="Au", recipe="Evaporation (normal)", thickness=Length.nm(15)),
+        ResistStrip(name="Retrait resine"),
+        Flip(name="Retournement"),
+    ]
+    with pytest.raises(SimulationError):
+        simulate(geometry, flow, materials, recipes)
