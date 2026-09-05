@@ -361,7 +361,9 @@ class Geometry:
         else:
             growth_base = solid
 
-        padded = self._pad(growth_base)
+        # SAG: never bulk-pad the seed — the floor extension would span the full domain width
+        # and cause growth to appear everywhere.  Only pad for non-selective blanket growth.
+        padded = growth_base if seed_materials else self._pad(growth_base)
 
         # --- sweep the growth base along the growth direction ---
         if orientation == "c_plane":
@@ -452,7 +454,8 @@ class Geometry:
         else:
             growth_base = solid
 
-        padded = self._pad(growth_base)
+        # SAG: never bulk-pad the seed (same reason as deposit_epitaxial).
+        padded = growth_base if seed_materials else self._pad(growth_base)
 
         # --- Kinetic Wulff growth polygon ----------------------------------
         # CCW-ordered vertices of the growth shape from a point seed at origin.
