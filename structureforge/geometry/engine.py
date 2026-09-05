@@ -302,6 +302,94 @@ class Geometry:
         else:
             self.deposit_directional(material, thickness_nm, recipe.angle_deg)
 
+    def deposit_epitaxial(
+        self,
+        material: str,
+        thickness_nm: float,
+        orientation: str = "c_plane",
+        angle_deg: float = 0.0,
+        seed_materials: list[str] | None = None,
+    ) -> None:
+        """Selective-area epitaxial growth — three orientations, optional SAG selectivity.
+
+        c_plane   — strictly upward growth along [0001]: new material rises above every exposed
+                    seed surface.  Models blanket or SAG c-plane GaN/AlGaN/InGaN regrowth.
+        m_plane   — lateral growth on {10-10} sidewalls: the film spreads horizontally in both
+                    ±x directions from every exposed seed surface.  Models shell growth on a
+                    pillar, or lateral ELO over a mask.
+        semi_polar — growth at `angle_deg` from the c-axis (from vertical): the film fans out
+                    both left-tilted and right-tilted from the seed surface, mimicking symmetric
+                    facet growth on a mesa or V-groove.
+
+        If `seed_materials` is non-empty the film nucleates *only* where one of those materials
+        is the topmost exposed surface (every non-seed layer covering the seed blocks growth
+        there — SAG selectivity).  Pass an empty list / None to grow on all exposed surfaces.
+        """
+        if thickness_nm <= 0 or not self.layers:
+            return
+        solid = self.solid()
+        if solid.is_empty:
+            return
+
+        y_min, y_max = solid.bounds[1], solid.bounds[3]
+
+        # --- resolve growth origin (with or without SAG selectivity) ---
+        if seed_materials:
+            seed_polys = [l.polygon for l in self.layers if l.material in seed_materials and not l.polygon.is_empty]
+            if not seed_polys:
+                return
+            seed_union = _clean(unary_union(seed_polys))
+            non_seed_polys = [l.polygon for l in self.layers if l.material not in seed_materials and not l.polygon.is_empty]
+            if non_seed_polys:
+                # A non-seed layer blocks the seed underneath its full x-footprint even though
+                # it sits above the seed in y and doesn't geometrically overlap it. Project each
+                # non-seed polygon downward (toward -∞) so the difference correctly removes the
+                # seed region hidden under a mask.
+                shadows = []
+                for p in non_seed_polys:
+                    parts = list(p.geoms) if isinstance(p, MultiPolygon) else [p]
+                    for part in parts:
+                        minx, miny, maxx, _ = part.bounds
+                        shadows.append(box(minx, miny - _GUARD_MARGIN, maxx, miny))
+                blocking = _clean(unary_union(non_seed_polys + shadows))
+                exposed_seed = _clean(seed_union.difference(blocking))
+            else:
+                exposed_seed = seed_union
+            if exposed_seed.is_empty:
+                return
+            growth_base = exposed_seed
+        else:
+            growth_base = solid
+
+        padded = self._pad(growth_base)
+
+        # --- sweep the growth base along the growth direction ---
+        if orientation == "c_plane":
+            film_raw = sweep_union(padded, (0.0, thickness_nm))
+        elif orientation == "m_plane":
+            # Symmetric lateral expansion on both sidewalls
+            film_raw = _clean(unary_union([
+                sweep_union(padded, (thickness_nm, 0.0)),
+                sweep_union(padded, (-thickness_nm, 0.0)),
+            ]))
+        elif orientation == "semi_polar":
+            # Symmetric tilted facets: ±x tilt from vertical by angle_deg
+            rad = math.radians(angle_deg)
+            dx = thickness_nm * math.sin(rad)
+            dy = thickness_nm * math.cos(rad)
+            film_raw = _clean(unary_union([
+                sweep_union(padded, (dx, dy)),
+                sweep_union(padded, (-dx, dy)),
+            ]))
+        else:  # pragma: no cover
+            raise ValueError(f"unknown epitaxial orientation {orientation!r}")
+
+        film = self._crop(_clean(film_raw.difference(padded)), y_min - thickness_nm, y_max + thickness_nm)
+        film = _drop_tiny(_clean(film.difference(solid)))
+
+        if not film.is_empty:
+            self.layers.append(Layer(material=material, polygon=film))
+
     def etch(
         self,
         recipe: EtchRecipe,

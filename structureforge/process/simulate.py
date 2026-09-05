@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from ..core.materials import MaterialLibrary
 from ..core.recipes import RecipeLibrary
 from ..geometry.engine import Geometry, Layer
-from .steps import ChemicalStep, Deposition, Etch, Lithography, Planarization, ProcessStep, ResistStrip
+from .steps import ChemicalStep, Deposition, EpitaxialGrowth, Etch, Lithography, Planarization, ProcessStep, ResistStrip
 
 
 class SimulationError(RuntimeError):
@@ -95,5 +95,14 @@ def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, re
     elif isinstance(step, ResistStrip):
         geometry.strip_material(step.material)
         geometry.remove_floating_debris()
+    elif isinstance(step, EpitaxialGrowth):
+        materials.get(step.material)  # fail fast if material unknown
+        geometry.deposit_epitaxial(
+            step.material,
+            step.thickness.to_nm(),
+            orientation=step.orientation.value,
+            angle_deg=step.angle_deg,
+            seed_materials=list(step.seed_materials) if step.seed_materials else None,
+        )
     else:  # pragma: no cover - exhaustive over ProcessStep's Union
         raise TypeError(f"unknown step type {type(step).__name__}")

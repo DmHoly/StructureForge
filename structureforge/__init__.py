@@ -20,7 +20,9 @@ from .geometry.engine import Geometry, Layer
 from .process.steps import (
     ChemicalStep,
     Deposition,
+    EpitaxialGrowth,
     Etch,
+    GrowthOrientation,
     Lithography,
     Planarization,
     ProcessStep,
@@ -50,6 +52,8 @@ __all__ = [
     "ChemicalStep",
     "Lithography",
     "ResistStrip",
+    "EpitaxialGrowth",
+    "GrowthOrientation",
     "Frame",
     "simulate",
     "SimulationError",
