@@ -632,6 +632,11 @@ class Geometry:
         construction (the mirror axis is the solid's own mid-height) - only what used to be
         "up" is now "down".
 
+        `self.layers` is reversed at the same time, so `layers[0]` keeps meaning "the anchor
+        `remove_floating_debris` treats as attached down" - after a flip that's whatever just
+        became the new bottom (bonded to the carrier), not the original substrate, which is now
+        floating freely at the new top like everything else.
+
         Requires the current top surface to be flat across the *entire* domain width, the same
         way a real temporary bond needs a flat surface to adhere to: raises `ValueError`
         otherwise (e.g. an isolated raised feature wouldn't actually make contact with a carrier
@@ -656,9 +661,11 @@ class Geometry:
             )
 
         mirror_axis = (y_min + y_max) / 2.0
-        for layer in self.layers:
-            if not layer.polygon.is_empty:
-                layer.polygon = _clean(scale(layer.polygon, xfact=1.0, yfact=-1.0, origin=(0.0, mirror_axis)))
+        flipped = []
+        for layer in reversed(self.layers):
+            polygon = layer.polygon if layer.polygon.is_empty else _clean(scale(layer.polygon, xfact=1.0, yfact=-1.0, origin=(0.0, mirror_axis)))
+            flipped.append(Layer(material=layer.material, polygon=polygon))
+        self.layers = flipped
 
     def remove_floating_debris(self) -> None:
         """Drop any part of the solid not connected down to the substrate (`layers[0]`). Called

@@ -49,6 +49,21 @@ def test_flip_twice_returns_to_the_original_geometry():
     assert {l.material: pytest.approx(l.polygon.area, abs=1e-6) for l in g.layers} == pytest.approx(original_areas)
 
 
+def test_flip_reverses_layer_order_so_layers_0_is_the_new_bottom():
+    """`remove_floating_debris` always anchors on `layers[0]`, meaning "whatever is bonded down"
+    - after a flip that must be whatever just became the new bottom (the former top, now bonded
+    to the carrier), not the original substrate, which floats freely at the new top like
+    everything else once flipped.
+    """
+    g = Geometry.substrate("Si", domain_width_nm=100, thickness_nm=30)
+    g.deposit_conformal("Au", 15)  # Au is now the front surface, on top of Si
+
+    g.flip()
+
+    assert g.layers[0].material == "Au"  # the former top is now the anchor at the bottom
+    assert g.layers[-1].material == "Si"  # the original substrate now floats freely at the top
+
+
 def test_flip_rejects_a_non_flat_front_surface():
     """An isolated raised feature narrower than the domain (e.g. a lift-off metal plot) leaves
     gaps beside it at the top - flipping that wouldn't actually bond down anything in those gaps,
