@@ -614,6 +614,93 @@ button.ghost:hover {
   padding-top: var(--space-3);
 }
 
+/* -- sim bar (auto-simulate status + force button) -------------------- */
+
+.sim-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.sim-status {
+  flex: 1;
+  font-size: 0.78rem;
+  color: var(--muted);
+  min-height: 1.4em;
+}
+
+.sim-status.pending::before {
+  content: "";
+  display: inline-block;
+  width: 0.65em;
+  height: 0.65em;
+  border: 2px solid var(--accent);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  margin-right: 0.4em;
+  vertical-align: middle;
+}
+
+.sim-status.ok { color: var(--success); }
+.sim-status.err { color: var(--error); }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.sim-force-btn {
+  flex-shrink: 0;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.78rem;
+}
+
+/* -- add/edit step bar ------------------------------------------------ */
+
+.add-step-bar {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.add-step-main {
+  flex: 1;
+}
+
+.cancel-edit-btn {
+  flex-shrink: 0;
+}
+
+/* -- step list with action buttons ------------------------------------ */
+
+.step-list li.editing {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--input-bg));
+}
+
+.step-actions {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.step-move-btn {
+  padding: 0.15rem 0.4rem;
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+.step-edit-btn {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.75rem;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.step-del-btn {
+  padding: 0.2rem 0.55rem;
+  font-size: 0.75rem;
+}
+
 /* -- epitaxial growth hint -------------------------------------------- */
 
 .epi-hint {

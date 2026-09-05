@@ -8,7 +8,28 @@ const state = {
   frames: [],
   frameIndex: 0,
   globalBounds: null, // {x0,x1,y0,y1} across every frame, for a stable overview scale
+  editingIndex: null, // index of the step currently being edited, or null
 };
+
+let _simDebounce = null;
+
+function setSimStatus(kind, text) {
+  const el = $("sim-status");
+  el.className = "sim-status" + (kind ? " " + kind : "");
+  el.textContent = text;
+}
+
+function scheduleSimulation(delayMs = 600) {
+  if (state.steps.length === 0) {
+    setSimStatus("", "");
+    return;
+  }
+  setSimStatus("pending", "En attente...");
+  clearTimeout(_simDebounce);
+  _simDebounce = setTimeout(() => {
+    runSimulation().catch((err) => showSimError(String(err)));
+  }, delayMs);
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -178,17 +199,125 @@ function renderStepList() {
   $("step-list-empty").hidden = state.steps.length > 0;
   state.steps.forEach((step, i) => {
     const li = document.createElement("li");
-    li.innerHTML = `<span><span class="step-kind">${step.kind}</span>${step.name}</span>`;
-    const removeBtn = document.createElement("button");
-    removeBtn.type = "button";
-    removeBtn.textContent = "Supprimer";
-    removeBtn.addEventListener("click", () => {
-      state.steps.splice(i, 1);
+    if (i === state.editingIndex) li.classList.add("editing");
+    li.innerHTML = `<span class="step-label"><span class="step-kind">${step.kind}</span>${step.name}</span>`;
+
+    const actions = document.createElement("div");
+    actions.className = "step-actions";
+
+    const upBtn = document.createElement("button");
+    upBtn.type = "button"; upBtn.className = "step-move-btn"; upBtn.textContent = "↑";
+    upBtn.disabled = i === 0;
+    upBtn.title = "Monter";
+    upBtn.addEventListener("click", () => {
+      [state.steps[i - 1], state.steps[i]] = [state.steps[i], state.steps[i - 1]];
+      if (state.editingIndex === i) state.editingIndex = i - 1;
+      else if (state.editingIndex === i - 1) state.editingIndex = i;
+      renderStepList();
+      scheduleSimulation();
+    });
+
+    const downBtn = document.createElement("button");
+    downBtn.type = "button"; downBtn.className = "step-move-btn"; downBtn.textContent = "↓";
+    downBtn.disabled = i === state.steps.length - 1;
+    downBtn.title = "Descendre";
+    downBtn.addEventListener("click", () => {
+      [state.steps[i], state.steps[i + 1]] = [state.steps[i + 1], state.steps[i]];
+      if (state.editingIndex === i) state.editingIndex = i + 1;
+      else if (state.editingIndex === i + 1) state.editingIndex = i;
+      renderStepList();
+      scheduleSimulation();
+    });
+
+    const editBtn = document.createElement("button");
+    editBtn.type = "button"; editBtn.className = "step-edit-btn";
+    editBtn.textContent = state.editingIndex === i ? "✎ En cours" : "Editer";
+    editBtn.addEventListener("click", () => {
+      state.editingIndex = i;
+      populateFormFromStep(step);
       renderStepList();
     });
-    li.appendChild(removeBtn);
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button"; delBtn.className = "step-del-btn"; delBtn.textContent = "✕";
+    delBtn.title = "Supprimer";
+    delBtn.addEventListener("click", () => {
+      state.steps.splice(i, 1);
+      if (state.editingIndex === i) cancelEdit();
+      else if (state.editingIndex > i) state.editingIndex--;
+      renderStepList();
+      scheduleSimulation();
+    });
+
+    actions.appendChild(upBtn);
+    actions.appendChild(downBtn);
+    actions.appendChild(editBtn);
+    actions.appendChild(delBtn);
+    li.appendChild(actions);
     list.appendChild(li);
   });
+
+  // Update add button label and cancel button visibility
+  $("add-step-btn").textContent = state.editingIndex !== null ? "✓ Modifier l'etape" : "+ Ajouter l'etape";
+  $("cancel-edit-btn").hidden = state.editingIndex === null;
+}
+
+function cancelEdit() {
+  state.editingIndex = null;
+  $("step-name").value = "";
+  $("add-step-btn").textContent = "+ Ajouter l'etape";
+  $("cancel-edit-btn").hidden = true;
+  renderStepList();
+}
+
+function populateFormFromStep(step) {
+  $("step-kind").value = step.kind;
+  $("step-name").value = step.name || "";
+  switchStepKindFields();
+
+  const nm = (l) => l ? l.value : 0;
+
+  if (step.kind === "deposition") {
+    $("dep-material").value = step.material;
+    $("dep-recipe").value = step.recipe;
+    $("dep-thickness").value = nm(step.thickness);
+  } else if (step.kind === "etch") {
+    $("etch-recipe").value = step.recipe;
+    $("etch-depth").value = nm(step.depth);
+  } else if (step.kind === "planarization") {
+    if (step.stop_material) {
+      $("pla-mode").value = "stop_material";
+      $("pla-stop-material").value = step.stop_material;
+    } else {
+      $("pla-mode").value = "target_level";
+      $("pla-level").value = nm(step.target_level);
+    }
+    switchPlanarizationMode();
+  } else if (step.kind === "lithography") {
+    $("litho-material").value = step.resist_material;
+    $("litho-thickness").value = nm(step.thickness);
+    $("litho-openings").value = (step.openings || []).map(([a, b]) => `${a}-${b}`).join(", ");
+  } else if (step.kind === "resist_strip") {
+    $("strip-material").value = step.material;
+  } else if (step.kind === "faceted_growth") {
+    $("fac-material").value = step.material;
+    $("fac-thickness").value = nm(step.thickness);
+    $("fac-rate-c").value = step.rate_c ?? 1;
+    $("fac-rate-m").value = step.rate_m ?? 0.25;
+    $("fac-rate-sp").value = step.rate_sp ?? 0.5;
+    $("fac-angle-sp").value = step.semi_polar_angle_deg ?? 30;
+    $("fac-seed-materials").value = (step.seed_materials || []).join(", ");
+    updateFacetedTipHint();
+  } else if (step.kind === "epitaxial_growth") {
+    $("epi-material").value = step.material;
+    $("epi-thickness").value = nm(step.thickness);
+    $("epi-orientation").value = step.orientation || "c_plane";
+    $("epi-angle").value = step.angle_deg ?? 32;
+    $("epi-seed-materials").value = (step.seed_materials || []).join(", ");
+    switchEpiOrientation();
+  } else if (step.kind === "chemical") {
+    $("chem-description").value = step.description || "";
+  }
 }
 
 function showSimError(message) {
@@ -212,6 +341,7 @@ function buildSubstrateSpec() {
 
 async function runSimulation() {
   showSimError(null);
+  setSimStatus("pending", "Calcul en cours...");
   const body = { substrate: buildSubstrateSpec(), steps: state.steps };
   let response;
   try {
@@ -221,11 +351,13 @@ async function runSimulation() {
       body: JSON.stringify(body),
     });
   } catch (err) {
+    setSimStatus("err", "Erreur reseau");
     showSimError(`Erreur reseau: ${err}`);
     return;
   }
   const data = await response.json();
   if (!response.ok) {
+    setSimStatus("err", "Erreur");
     showSimError(data.detail ? JSON.stringify(data.detail) : "Erreur de simulation");
     return;
   }
@@ -236,6 +368,7 @@ async function runSimulation() {
   slider.value = String(data.frames.length - 1);
   setFrame(data.frames.length - 1);
   fitZoomToStructure();
+  setSimStatus("ok", `✓ ${data.frames.length} etape(s)`);
 }
 
 function showFollowMessage(kind, message) {
@@ -623,16 +756,33 @@ function wireEvents() {
     $(id).addEventListener("input", updateFacetedTipHint);
   }
   $("pla-mode").addEventListener("change", switchPlanarizationMode);
+
+  // Substrate changes → auto-simulate
+  for (const id of ["substrate-material", "domain-width", "substrate-thickness"]) {
+    $(id).addEventListener("change", () => scheduleSimulation());
+  }
+
   $("add-step-btn").addEventListener("click", () => {
     try {
-      state.steps.push(buildStepFromForm());
-      renderStepList();
-      $("step-name").value = "";
+      const step = buildStepFromForm();
+      if (state.editingIndex !== null) {
+        state.steps[state.editingIndex] = step;
+        cancelEdit();
+      } else {
+        state.steps.push(step);
+        $("step-name").value = "";
+        renderStepList();
+      }
+      scheduleSimulation();
     } catch (err) {
       showSimError(String(err));
     }
   });
+
+  $("cancel-edit-btn").addEventListener("click", cancelEdit);
+
   $("simulate-btn").addEventListener("click", () => {
+    clearTimeout(_simDebounce);
     runSimulation().catch((err) => showSimError(String(err)));
   });
   $("export-follow-btn").addEventListener("click", () => {

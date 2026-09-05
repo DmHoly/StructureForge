@@ -176,14 +176,20 @@
           </label>
         </div>
 
-        <button id="add-step-btn" type="button">+ Ajouter l'etape</button>
+        <div class="add-step-bar">
+          <button id="add-step-btn" type="button" class="add-step-main">+ Ajouter l'etape</button>
+          <button id="cancel-edit-btn" type="button" class="cancel-edit-btn" hidden>Annuler</button>
+        </div>
       </section>
 
       <section class="panel">
         <h2>Etapes du process</h2>
         <ol id="step-list" class="step-list"></ol>
         <p id="step-list-empty" class="empty-hint">Aucune etape pour l'instant.</p>
-        <button id="simulate-btn" type="button" class="primary">Simuler</button>
+        <div class="sim-bar">
+          <span id="sim-status" class="sim-status"></span>
+          <button id="simulate-btn" type="button" class="sim-force-btn">Forcer</button>
+        </div>
         <p id="sim-error" class="error" hidden></p>
       </section>
     </aside>
