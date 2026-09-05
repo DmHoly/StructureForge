@@ -37,12 +37,13 @@ async function loadLibraries() {
   for (const m of materials) state.materialColors[m.name] = m.color;
 
   const materialNames = materials.map((m) => m.name);
-  for (const id of ["substrate-material", "dep-material", "epi-material", "pla-stop-material", "litho-material", "strip-material"]) {
+  for (const id of ["substrate-material", "dep-material", "epi-material", "fac-material", "pla-stop-material", "litho-material", "strip-material"]) {
     $(id).innerHTML = optionsHtml(materialNames);
   }
   $("litho-material").value = materialNames.includes("Photoresist") ? "Photoresist" : materialNames[0];
   $("strip-material").value = materialNames.includes("Photoresist") ? "Photoresist" : materialNames[0];
   $("epi-material").value = materialNames.includes("GaN") ? "GaN" : materialNames[0];
+  $("fac-material").value = materialNames.includes("GaN") ? "GaN" : materialNames[0];
 
   $("dep-recipe").innerHTML = optionsHtml(recipes.deposition.map((r) => r.name));
   $("etch-recipe").innerHTML = optionsHtml(recipes.etch.map((r) => r.name));
@@ -53,6 +54,25 @@ function switchStepKindFields() {
   const kind = $("step-kind").value;
   for (const el of document.querySelectorAll(".step-fields")) {
     el.classList.toggle("active", el.id === `fields-${kind}`);
+  }
+}
+
+function updateFacetedTipHint() {
+  const rc = parseFloat($("fac-rate-c").value) || 0;
+  const rsp = parseFloat($("fac-rate-sp").value) || 0;
+  const theta = parseFloat($("fac-angle-sp").value) || 30;
+  const spVertical = rsp * Math.cos(theta * Math.PI / 180);
+  const hint = $("fac-tip-hint");
+  if (rc <= 0 && rsp <= 0) {
+    hint.textContent = "";
+    return;
+  }
+  if (rc >= spVertical) {
+    const ratio = spVertical > 0 ? (rc / spVertical).toFixed(2) : "∞";
+    hint.textContent = `→ Plan C domine (×${ratio} vs SP vertical) — pointe plate attendue`;
+  } else {
+    const ratio = rc > 0 ? (spVertical / rc).toFixed(2) : "∞";
+    hint.textContent = `→ SP domine (×${ratio} vs C) — pointe aigue / pyramidale attendue`;
   }
 }
 
@@ -114,6 +134,19 @@ function buildStepFromForm() {
   }
   if (kind === "resist_strip") {
     return { kind, name, material: $("strip-material").value };
+  }
+  if (kind === "faceted_growth") {
+    const seedText = $("fac-seed-materials").value.trim();
+    return {
+      kind, name,
+      material: $("fac-material").value,
+      thickness: { value: parseFloat($("fac-thickness").value), unit: "nm" },
+      rate_c: parseFloat($("fac-rate-c").value),
+      rate_m: parseFloat($("fac-rate-m").value),
+      rate_sp: parseFloat($("fac-rate-sp").value),
+      semi_polar_angle_deg: parseFloat($("fac-angle-sp").value),
+      seed_materials: seedText ? seedText.split(",").map((s) => s.trim()).filter(Boolean) : [],
+    };
   }
   if (kind === "epitaxial_growth") {
     const orientation = $("epi-orientation").value;
@@ -586,6 +619,9 @@ function drawView(svg, frame, box) {
 function wireEvents() {
   $("step-kind").addEventListener("change", switchStepKindFields);
   $("epi-orientation").addEventListener("change", switchEpiOrientation);
+  for (const id of ["fac-rate-c", "fac-rate-sp", "fac-angle-sp"]) {
+    $(id).addEventListener("input", updateFacetedTipHint);
+  }
   $("pla-mode").addEventListener("change", switchPlanarizationMode);
   $("add-step-btn").addEventListener("click", () => {
     try {
@@ -629,6 +665,7 @@ async function init() {
   wireEvents();
   switchStepKindFields();
   switchEpiOrientation();
+  updateFacetedTipHint();
   switchPlanarizationMode();
   populateRecipeModeOptions();
   await loadLibraries();

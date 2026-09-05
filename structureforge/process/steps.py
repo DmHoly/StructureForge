@@ -109,6 +109,58 @@ class ResistStrip(BaseModel):
     material: str = "Photoresist"
 
 
+class FacetedGrowth(BaseModel):
+    """Multi-facet epitaxial growth driven by relative per-plane growth rates.
+
+    Models the kinetic Wulff construction for III-N growth where three families of crystal
+    planes advance simultaneously at different speeds:
+
+    - c-plane {0001}   → rate_c  (reference, set to 1.0; grows strictly upward)
+    - m-plane {10-10}  → rate_m  (lateral sidewalls, typically 0.1–0.5 × rate_c)
+    - semi-polar facets → rate_sp (inclined planes, e.g. {10-11} or {11-22};
+                                    angle from c-axis = semi_polar_angle_deg)
+
+    `thickness` is the nominal growth increment for the c-plane (rate_c * thickness nm
+    of material are added above flat c-plane surfaces).  m-plane and semi-polar faces
+    advance by rate_m * thickness and rate_sp * thickness respectively.
+
+    **Pencil / pyramid tip shape**:
+    - rate_c >> rate_sp  →  c-plane grows fast upward, SP advances little  →  flat top
+    - rate_c << rate_sp  →  SP faces advance quickly and meet at a point  →  sharp tip
+    - rate_m controls how fast the wire widens laterally
+
+    The new film is the Minkowski sum of the exposed seed surface with the Wulff growth
+    polygon (the convex hull of the three growth vectors).  This correctly produces the
+    SP corner facets connecting the c-plane top to the m-plane sides without any explicit
+    if/else logic for corners.  Applying this step repeatedly (one thin layer per MQW
+    period) wraps each layer conformally around the pencil shape.
+
+    `seed_materials` works exactly like in `EpitaxialGrowth` (SAG selectivity).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["faceted_growth"] = "faceted_growth"
+    name: str
+    material: str
+    thickness: Length
+    rate_c: float = 1.0
+    rate_m: float = 0.3
+    rate_sp: float = 0.6
+    semi_polar_angle_deg: float = 30.0
+    seed_materials: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_rates(self) -> "FacetedGrowth":
+        if self.rate_c < 0 or self.rate_m < 0 or self.rate_sp < 0:
+            raise ValueError("growth rates must be >= 0")
+        if self.rate_c == 0 and self.rate_m == 0 and self.rate_sp == 0:
+            raise ValueError("at least one growth rate must be > 0")
+        if not (0.0 < self.semi_polar_angle_deg < 90.0):
+            raise ValueError(f"semi_polar_angle_deg must be in (0, 90), got {self.semi_polar_angle_deg}")
+        return self
+
+
 class EpitaxialGrowth(BaseModel):
     """Selective-area epitaxial growth (homo- or hetero-epitaxy) for III-N and related systems.
 
@@ -144,6 +196,6 @@ class EpitaxialGrowth(BaseModel):
 
 
 ProcessStep = Annotated[
-    Union[Deposition, Etch, Planarization, ChemicalStep, Lithography, ResistStrip, EpitaxialGrowth],
+    Union[Deposition, Etch, Planarization, ChemicalStep, Lithography, ResistStrip, EpitaxialGrowth, FacetedGrowth],
     Field(discriminator="kind"),
 ]

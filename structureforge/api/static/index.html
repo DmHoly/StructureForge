@@ -43,6 +43,7 @@
               <option value="deposition">Depot</option>
               <option value="etch">Gravure</option>
               <option value="epitaxial_growth">Croissance epitaxiale (SAG)</option>
+              <option value="faceted_growth">Croissance facettee (Wulff C/M/SP)</option>
               <option value="planarization">Planarisation</option>
               <option value="lithography">Lithographie (masque resine)</option>
               <option value="resist_strip">Retrait de resine</option>
@@ -72,6 +73,40 @@
           </label>
           <label>Profondeur nominale (nm)
             <input id="etch-depth" type="number" value="20" min="0" step="0.1" />
+          </label>
+        </div>
+
+        <div id="fields-faceted_growth" class="step-fields">
+          <div class="field-row">
+            <label>Materiau
+              <select id="fac-material"></select>
+            </label>
+            <label>Epaisseur nominale (nm)
+              <input id="fac-thickness" type="number" value="10" min="0.1" step="0.1" />
+            </label>
+          </div>
+          <p class="epi-hint">Vitesses relatives par plan cristallin (plan C = reference 1.0). L'epaisseur nominale est celle deposee sur le plan C.</p>
+          <div class="field-row">
+            <label>Vitesse plan C (ref.)
+              <input id="fac-rate-c" type="number" value="1.0" min="0" step="0.05" />
+            </label>
+            <label>Vitesse plan M
+              <input id="fac-rate-m" type="number" value="0.25" min="0" step="0.05" />
+            </label>
+          </div>
+          <div class="field-row">
+            <label>Vitesse semi-polaire
+              <input id="fac-rate-sp" type="number" value="0.5" min="0" step="0.05" />
+            </label>
+            <label>Angle semi-polaire (deg, depuis c-axe)
+              <input id="fac-angle-sp" type="number" value="30" min="1" max="89" step="1" />
+            </label>
+          </div>
+          <div class="faceted-tip-hint">
+            <span id="fac-tip-hint" class="epi-hint"></span>
+          </div>
+          <label>Seed materials — SAG (vide = pas de selectivite)
+            <input id="fac-seed-materials" type="text" placeholder="ex. GaN, AlN" />
           </label>
         </div>
 

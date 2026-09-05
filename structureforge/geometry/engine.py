@@ -390,6 +390,110 @@ class Geometry:
         if not film.is_empty:
             self.layers.append(Layer(material=material, polygon=film))
 
+    def deposit_faceted(
+        self,
+        material: str,
+        thickness_nm: float,
+        rate_c: float = 1.0,
+        rate_m: float = 0.3,
+        rate_sp: float = 0.6,
+        semi_polar_angle_deg: float = 30.0,
+        seed_materials: list[str] | None = None,
+    ) -> None:
+        """Kinetic-Wulff faceted growth: add `material` by advancing three crystal-plane
+        families simultaneously at different speeds.
+
+        The growth shape for one nominal unit of thickness is the convex hull of:
+          - (0, rate_c * t)          — c-plane {0001} top
+          - (±rate_m * t, 0)         — m-plane {10-10} sidewalls
+          - (±rate_sp*t*sin(θ), rate_sp*t*cos(θ))  — semi-polar facets at θ=semi_polar_angle_deg
+
+        The new film = Minkowski sum of the exposed seed surface with this Wulff polygon,
+        minus the already-existing solid.  Repeatedly applying thin layers (small `thickness_nm`)
+        produces conformal MQW stacks that faithfully follow the pencil/pyramid shape.
+
+        - rate_c >> rate_sp  →  c-plane wins, flat-top pencil
+        - rate_c << rate_sp  →  SP faces meet at a point, sharp pyramidal tip
+        - rate_m controls lateral widening per layer
+
+        `seed_materials` enables SAG selectivity (same semantics as `deposit_epitaxial`).
+        """
+        if thickness_nm <= 0 or not self.layers:
+            return
+        solid = self.solid()
+        if solid.is_empty:
+            return
+
+        y_min, y_max = solid.bounds[1], solid.bounds[3]
+        t = thickness_nm
+        theta = math.radians(semi_polar_angle_deg)
+
+        # --- SAG selectivity -----------------------------------------------
+        if seed_materials:
+            seed_polys = [l.polygon for l in self.layers if l.material in seed_materials and not l.polygon.is_empty]
+            if not seed_polys:
+                return
+            seed_union = _clean(unary_union(seed_polys))
+            non_seed_polys = [l.polygon for l in self.layers if l.material not in seed_materials and not l.polygon.is_empty]
+            if non_seed_polys:
+                shadows = []
+                for p in non_seed_polys:
+                    parts = list(p.geoms) if isinstance(p, MultiPolygon) else [p]
+                    for part in parts:
+                        minx, miny, maxx, _ = part.bounds
+                        shadows.append(box(minx, miny - _GUARD_MARGIN, maxx, miny))
+                blocking = _clean(unary_union(non_seed_polys + shadows))
+                exposed_seed = _clean(seed_union.difference(blocking))
+            else:
+                exposed_seed = seed_union
+            if exposed_seed.is_empty:
+                return
+            growth_base = exposed_seed
+        else:
+            growth_base = solid
+
+        padded = self._pad(growth_base)
+
+        # --- Kinetic Wulff growth polygon ----------------------------------
+        # CCW-ordered vertices of the growth shape from a point seed at origin.
+        # The convex hull of these vectors defines how far each plane advances.
+        wulff_verts: list[tuple[float, float]] = [(0.0, 0.0)]
+        if rate_m > 0:
+            wulff_verts.append((rate_m * t, 0.0))
+        if rate_sp > 0:
+            wulff_verts.append((rate_sp * t * math.sin(theta), rate_sp * t * math.cos(theta)))
+        if rate_c > 0:
+            wulff_verts.append((0.0, rate_c * t))
+        if rate_sp > 0:
+            wulff_verts.insert(0, (-rate_sp * t * math.sin(theta), rate_sp * t * math.cos(theta)))
+        if rate_m > 0:
+            wulff_verts.insert(0, (-rate_m * t, 0.0))
+
+        wulff = _clean(Polygon(wulff_verts).convex_hull)
+
+        # --- Minkowski sum: padded ⊕ wulff ---------------------------------
+        # For a convex polygon W, A⊕W = union over all points p in W of translate(A, p).
+        # Computed exactly as: translates at each vertex + sweep_union along each edge.
+        wulff_coords = list(wulff.exterior.coords)
+        pieces: list[BaseGeometry] = []
+        for vx, vy in wulff_coords[:-1]:
+            pieces.append(translate(padded, vx, vy))
+        for (x1, y1), (x2, y2) in zip(wulff_coords[:-1], wulff_coords[1:]):
+            pieces.append(sweep_union(translate(padded, x1, y1), (x2 - x1, y2 - y1)))
+
+        grown = _clean(unary_union(pieces))
+
+        max_reach = max(rate_c, rate_sp) * t
+        film = self._crop(
+            _clean(grown.difference(padded)),
+            y_min - t,
+            y_max + max_reach + 1.0,
+        )
+        film = _drop_tiny(_clean(film.difference(solid)))
+
+        if not film.is_empty:
+            self.layers.append(Layer(material=material, polygon=film))
+
     def etch(
         self,
         recipe: EtchRecipe,

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from ..core.materials import MaterialLibrary
 from ..core.recipes import RecipeLibrary
 from ..geometry.engine import Geometry, Layer
-from .steps import ChemicalStep, Deposition, EpitaxialGrowth, Etch, Lithography, Planarization, ProcessStep, ResistStrip
+from .steps import ChemicalStep, Deposition, EpitaxialGrowth, FacetedGrowth, Etch, Lithography, Planarization, ProcessStep, ResistStrip
 
 
 class SimulationError(RuntimeError):
@@ -102,6 +102,17 @@ def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, re
             step.thickness.to_nm(),
             orientation=step.orientation.value,
             angle_deg=step.angle_deg,
+            seed_materials=list(step.seed_materials) if step.seed_materials else None,
+        )
+    elif isinstance(step, FacetedGrowth):
+        materials.get(step.material)
+        geometry.deposit_faceted(
+            step.material,
+            step.thickness.to_nm(),
+            rate_c=step.rate_c,
+            rate_m=step.rate_m,
+            rate_sp=step.rate_sp,
+            semi_polar_angle_deg=step.semi_polar_angle_deg,
             seed_materials=list(step.seed_materials) if step.seed_materials else None,
         )
     else:  # pragma: no cover - exhaustive over ProcessStep's Union
