@@ -78,12 +78,19 @@ def sweep_union(geom: BaseGeometry, vector: tuple[float, float]) -> BaseGeometry
 
 
 def _offset_named_facets(
-    solid: BaseGeometry, named_directions: list[tuple[float, float, float]]
-) -> BaseGeometry:
+    solid: BaseGeometry, named_directions: list[tuple[float, float, float, str]]
+) -> dict[str, BaseGeometry]:
     """Advance each straight edge of `solid`'s exterior ring(s) along its own outward normal by
-    the distance named for that exact direction in `named_directions` (nx, ny, distance) - 0 (or
-    absent) for any direction not meant to move. Every other edge (any normal not in the list at
-    all) is left exactly where it is.
+    the distance named for that exact direction in `named_directions` (nx, ny, distance, family
+    label) - 0 (or absent) for any direction not meant to move. Every other edge (any normal not
+    in the list at all) is left exactly where it is.
+
+    Returns the *new* area alone (not yet unioned with `solid`, nor differenced against it -
+    callers do both), grouped by the family label of whichever named direction produced each
+    piece: every edge strip belongs entirely to its own edge's family, and a corner fan spanning
+    several named directions is split into one sub-wedge per direction it nucleates, so a caller
+    that wants "more indium on the c-plane, less on the semi-polar facets" can hand each family's
+    share of the film to a different material instead of one flat composition for the whole layer.
 
     This is a per-facet offset, not a global one. For each vertex, the two adjacent edges' offset
     lines (plus, at a convex corner, any named direction whose normal cone falls strictly between
@@ -112,22 +119,29 @@ def _offset_named_facets(
     instead - the two facets' plain per-line offsets, joined by a short straight cut - rather than
     chase a point that distant.
     """
-    named_directions = [(nx, ny, d) for nx, ny, d in named_directions if d > 1e-9]
-    named = [(nx, ny, d, math.atan2(ny, nx)) for nx, ny, d in named_directions]
+    named_directions = [(nx, ny, d, label) for nx, ny, d, label in named_directions if d > 1e-9]
+    named = [(nx, ny, d, label, math.atan2(ny, nx)) for nx, ny, d, label in named_directions]
 
-    def classify(nx: float, ny: float) -> float:
-        for dx, dy, d, _ang in named:
+    def classify(nx: float, ny: float) -> tuple[float, str]:
+        for dx, dy, d, label, _ang in named:
             if abs(nx - dx) < 1e-4 and abs(ny - dy) < 1e-4:
-                return d
-        return 0.0
+                return d, label
+        return 0.0, ""
 
     def mitre_or_bevel(
-        v: tuple[float, float], n1: tuple[float, float], d1: float, n2: tuple[float, float], d2: float
-    ) -> list[tuple[float, float]]:
-        """The point where offset lines n1@d1 and n2@d2 (both measured from `v`) cross - or, if
-        that crossing lands unreasonably far out (near-tangent normals paired with very unequal
-        distances - e.g. a barely-active facet next to a fast one, at a shallow angle between
-        them), two points instead: the plain per-line offsets, bevelling the corner rather than
+        v: tuple[float, float],
+        n1: tuple[float, float],
+        d1: float,
+        label1: str,
+        n2: tuple[float, float],
+        d2: float,
+        label2: str,
+    ) -> list[tuple[tuple[float, float], str]]:
+        """The point where offset lines n1@d1 and n2@d2 (both measured from `v`) cross, tagged
+        with `label2` (the direction it's arriving at) - or, if that crossing lands unreasonably
+        far out (near-tangent normals paired with very unequal distances - e.g. a barely-active
+        facet next to a fast one, at a shallow angle between them), two points instead: the plain
+        per-line offsets (tagged with their own facet's label), bevelling the corner rather than
         chasing a mitre point that could otherwise land tens of times further out than either
         facet actually advanced.
         """
@@ -137,21 +151,25 @@ def _offset_named_facets(
         c, d = n2
         det = a * d - b * c
         if abs(det) < 1e-9:
-            return [p1]
+            return [(p1, label2)]
         px = (d1 * d - b * d2) / det
         py = (a * d2 - c * d1) / det
         point = (v[0] + px, v[1] + py)
         if math.hypot(point[0] - v[0], point[1] - v[1]) > 1.5 * (d1 + d2):
-            return [p1, p2]
-        return [point]
+            return [(p1, label1), (p2, label2)]
+        return [(point, label2)]
 
     def between_ccw(angle: float, lo: float, hi: float) -> bool:
         span = (hi - lo) % (2 * math.pi)
         rel = (angle - lo) % (2 * math.pi)
         return 1e-9 < rel < span - 1e-9
 
+    pieces_by_family: dict[str, list[BaseGeometry]] = {}
+
+    def add_piece(label: str, geom: BaseGeometry) -> None:
+        pieces_by_family.setdefault(label, []).append(geom)
+
     parts = list(solid.geoms) if isinstance(solid, MultiPolygon) else [solid]
-    pieces: list[BaseGeometry] = [solid]
     for part in parts:
         part = orient(part, sign=1.0)
         coords = list(part.exterior.coords)[:-1]
@@ -162,52 +180,55 @@ def _offset_named_facets(
 
         normals: list[tuple[float, float]] = []
         dists: list[float] = []
+        labels: list[str] = []
         for i in range(n):
             x1, y1 = coords[i]
             x2, y2 = coords[(i + 1) % n]
             length = math.hypot(x2 - x1, y2 - y1)
             nx, ny = (y2 - y1) / length, -(x2 - x1) / length
             normals.append((nx, ny))
-            dists.append(classify(nx, ny))
+            d, label = classify(nx, ny)
+            dists.append(d)
+            labels.append(label)
 
         near_pt: list[tuple[float, float]] = [(0.0, 0.0)] * n
         far_pt: list[tuple[float, float]] = [(0.0, 0.0)] * n
         for i in range(n):
             v = coords[i]
-            n_in, d_in = normals[i - 1], dists[i - 1]
-            n_out, d_out = normals[i], dists[i]
+            n_in, d_in, lbl_in = normals[i - 1], dists[i - 1], labels[i - 1]
+            n_out, d_out, lbl_out = normals[i], dists[i], labels[i]
             edge_in_dir = (-n_in[1], n_in[0])
             edge_out_dir = (-n_out[1], n_out[0])
             convex = edge_in_dir[0] * edge_out_dir[1] - edge_in_dir[1] * edge_out_dir[0] > 1e-9
 
-            chain = [(n_in[0], n_in[1], d_in)]
+            chain = [(n_in[0], n_in[1], d_in, lbl_in)]
             if convex:
                 ang_in = math.atan2(n_in[1], n_in[0])
                 ang_out = math.atan2(n_out[1], n_out[0])
                 extras = sorted(
-                    ((nx, ny, d, ang) for nx, ny, d, ang in named if between_ccw(ang, ang_in, ang_out)),
-                    key=lambda e: (e[3] - ang_in) % (2 * math.pi),
+                    ((nx, ny, d, label, ang) for nx, ny, d, label, ang in named if between_ccw(ang, ang_in, ang_out)),
+                    key=lambda e: (e[4] - ang_in) % (2 * math.pi),
                 )
-                chain.extend((nx, ny, d) for nx, ny, d, _ang in extras)
-            chain.append((n_out[0], n_out[1], d_out))
+                chain.extend((nx, ny, d, label) for nx, ny, d, label, _ang in extras)
+            chain.append((n_out[0], n_out[1], d_out, lbl_out))
 
             mitre_points = [
-                p
-                for (nx1, ny1, d1), (nx2, ny2, d2) in zip(chain, chain[1:])
-                for p in mitre_or_bevel(v, (nx1, ny1), d1, (nx2, ny2), d2)
+                tagged
+                for (nx1, ny1, d1, l1), (nx2, ny2, d2, l2) in zip(chain, chain[1:])
+                for tagged in mitre_or_bevel(v, (nx1, ny1), d1, l1, (nx2, ny2), d2, l2)
             ]
-            near_pt[i] = mitre_points[0]
-            far_pt[i] = mitre_points[-1]
-            if len(mitre_points) > 1:
-                pieces.append(Polygon([v, *mitre_points]).buffer(0))
+            near_pt[i] = mitre_points[0][0]
+            far_pt[i] = mitre_points[-1][0]
+            for (p_a, label_a), (p_b, _label_b) in zip(mitre_points, mitre_points[1:]):
+                add_piece(label_a, Polygon([v, p_a, p_b]).buffer(0))
 
         for i in range(n):
             if dists[i] <= 0:
                 continue
             v_i, v_next = coords[i], coords[(i + 1) % n]
-            pieces.append(Polygon([v_i, v_next, near_pt[(i + 1) % n], far_pt[i]]).buffer(0))
+            add_piece(labels[i], Polygon([v_i, v_next, near_pt[(i + 1) % n], far_pt[i]]).buffer(0))
 
-    return _clean(unary_union(pieces))
+    return {label: _clean(unary_union(pcs)) for label, pcs in pieces_by_family.items()}
 
 
 def beam_vector(angle_deg: float, length: float) -> tuple[float, float]:
@@ -535,6 +556,9 @@ class Geometry:
         rate_sp: float = 0.6,
         semi_polar_angle_deg: float = 30.0,
         seed_materials: list[str] | None = None,
+        material_c: str | None = None,
+        material_m: str | None = None,
+        material_sp: str | None = None,
     ) -> None:
         """Faceted growth: add `material` by advancing three crystal-plane families - c-plane
         {0001} (`rate_c`), m-plane {10-10} sidewalls (`rate_m`), and semi-polar facets at
@@ -564,6 +588,17 @@ class Geometry:
 
         Repeatedly applying thin layers (small `thickness_nm`) produces conformal MQW stacks that
         faithfully follow the pencil/pyramid shape as it develops.
+
+        `material_c`/`material_m`/`material_sp` let each facet family incorporate a *different*
+        material - typically the same alloy at a different composition, e.g. more indium on the
+        c-plane than on the semi-polar facets (`material_c=indium_gan(0.30).name,
+        material_sp=indium_gan(0.10).name`), matching the well-known facet-dependent indium
+        incorporation of real InGaN growth. Any of the three left as None falls back to
+        `material`. When they all resolve to the same name (the default - none given) this adds
+        exactly one `Layer`, as before; otherwise it adds one `Layer` per distinct material,
+        each holding only the area that actually grew from that family's own facets (a corner
+        where a new facet nucleates between two different families is split at the nucleation
+        point, not blended - there is no in-between composition at a sub-nm sharp edge).
 
         `seed_materials` enables SAG selectivity (same semantics as `deposit_epitaxial`).
         """
@@ -605,24 +640,39 @@ class Geometry:
         padded = growth_base if seed_materials else self._pad(growth_base)
 
         named_directions = [
-            (0.0, 1.0, rate_c * t),
-            (1.0, 0.0, rate_m * t),
-            (-1.0, 0.0, rate_m * t),
-            (math.sin(theta), math.cos(theta), rate_sp * t),
-            (-math.sin(theta), math.cos(theta), rate_sp * t),
+            (0.0, 1.0, rate_c * t, "c"),
+            (1.0, 0.0, rate_m * t, "m"),
+            (-1.0, 0.0, rate_m * t, "m"),
+            (math.sin(theta), math.cos(theta), rate_sp * t, "sp"),
+            (-math.sin(theta), math.cos(theta), rate_sp * t, "sp"),
         ]
-        grown = _offset_named_facets(padded, named_directions)
-
+        pieces_by_family = _offset_named_facets(padded, named_directions)
         max_reach = t * (rate_c + rate_m + rate_sp) / max(math.cos(theta), 0.05) + 1.0
-        film = self._crop(
-            _clean(grown.difference(padded)),
-            y_min - t,
-            y_max + max_reach,
-        )
-        film = _drop_tiny(_clean(film.difference(solid)))
 
-        if not film.is_empty:
-            self.layers.append(Layer(material=material, polygon=film))
+        materials_by_family = {"c": material_c or material, "m": material_m or material, "sp": material_sp or material}
+        pieces_by_material: dict[str, list[BaseGeometry]] = {}
+        if len(set(materials_by_family.values())) == 1:
+            # No per-facet override (the common case): keep the single-Layer behaviour exactly
+            # as before, rather than needlessly splitting one material into three identical Layers.
+            pieces_by_material[material] = list(pieces_by_family.values())
+        else:
+            for family in ("c", "m", "sp", *sorted(set(pieces_by_family) - {"c", "m", "sp"})):
+                if family in pieces_by_family:
+                    pieces_by_material.setdefault(materials_by_family.get(family, material), []).append(
+                        pieces_by_family[family]
+                    )
+
+        for layer_material, new_areas in pieces_by_material.items():
+            new_area = unary_union(new_areas)
+            grown = _clean(unary_union([solid, new_area]))
+            film = self._crop(
+                _clean(grown.difference(padded)),
+                y_min - t,
+                y_max + max_reach,
+            )
+            film = _drop_tiny(_clean(film.difference(solid)))
+            if not film.is_empty:
+                self.layers.append(Layer(material=layer_material, polygon=film))
 
     def etch(
         self,

@@ -306,3 +306,54 @@ def test_faceted_growth_mitre_bevels_instead_of_blowing_up_at_a_lopsided_rate_ra
     max_reach = 5.0 * 5.0  # rate_sp * thickness, generously bounding how far any facet should reach
     assert solid.bounds[0] > 40.0 - 3 * max_reach
     assert solid.bounds[2] < 60.0 + 3 * max_reach
+
+
+def _run_faceted(**overrides):
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    kwargs = dict(thickness_nm=3.0, rate_c=1.0, rate_m=0.3, rate_sp=0.6, semi_polar_angle_deg=32.0)
+    kwargs.update(overrides)
+    g.deposit_faceted("GaN", **kwargs)
+    return g
+
+
+def test_faceted_growth_without_per_facet_overrides_still_adds_a_single_layer():
+    """No material_c/material_m/material_sp given (the default) must behave exactly as before -
+    one Layer named `material`, not one per family.
+    """
+    g = _run_faceted()
+    new_layers = g.layers[1:]
+    assert len(new_layers) == 1
+    assert new_layers[0].material == "GaN"
+
+
+def test_faceted_growth_splits_into_one_layer_per_distinct_facet_material():
+    """More indium on the c-plane than on the semi-polar facets (the motivating case) - each
+    facet family's own share of the film becomes its own Layer, and nothing is double-counted
+    or dropped: the three per-family areas must sum to exactly what a single unsplit material
+    would have covered.
+    """
+    reference = _run_faceted()
+    reference_area = reference.layers[-1].polygon.area
+
+    g = _run_faceted(material_c="In0.30Ga0.70N", material_m="GaN", material_sp="In0.10Ga0.90N")
+    new_layers = g.layers[1:]
+    materials = {layer.material for layer in new_layers}
+    assert materials == {"In0.30Ga0.70N", "GaN", "In0.10Ga0.90N"}
+
+    total_area = sum(layer.polygon.area for layer in new_layers)
+    assert total_area == pytest.approx(reference_area)
+
+    # the c-plane's own share sits at the flat top, the widest single facet at these rates
+    c_layer = next(layer for layer in new_layers if layer.material == "In0.30Ga0.70N")
+    assert c_layer.polygon.bounds[1] == pytest.approx(50.0)  # starts exactly at the original top
+
+
+def test_faceted_growth_unset_per_facet_materials_fall_back_to_the_base_material():
+    """Only overriding material_c: the m- and sp-grown areas both fall back to `material` and
+    merge into one Layer (they're the same name), while the c-plane gets its own.
+    """
+    g = _run_faceted(material_c="In0.30Ga0.70N")
+    new_layers = g.layers[1:]
+    materials = {layer.material for layer in new_layers}
+    assert materials == {"In0.30Ga0.70N", "GaN"}

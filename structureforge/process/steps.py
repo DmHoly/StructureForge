@@ -127,28 +127,32 @@ class Flip(BaseModel):
 class FacetedGrowth(BaseModel):
     """Multi-facet epitaxial growth driven by relative per-plane growth rates.
 
-    Models the kinetic Wulff construction for III-N growth where three families of crystal
-    planes advance simultaneously at different speeds:
+    Three families of crystal planes each advance strictly along their own outward normal, at
+    their own rate, independently of the other two:
 
-    - c-plane {0001}   → rate_c  (reference, set to 1.0; grows strictly upward)
-    - m-plane {10-10}  → rate_m  (lateral sidewalls, typically 0.1–0.5 × rate_c)
+    - c-plane {0001}    → rate_c  (grows strictly upward)
+    - m-plane {10-10}   → rate_m  (lateral sidewalls)
     - semi-polar facets → rate_sp (inclined planes, e.g. {10-11} or {11-22};
                                     angle from c-axis = semi_polar_angle_deg)
 
-    `thickness` is the nominal growth increment for the c-plane (rate_c * thickness nm
-    of material are added above flat c-plane surfaces).  m-plane and semi-polar faces
-    advance by rate_m * thickness and rate_sp * thickness respectively.
+    `thickness` is the nominal growth increment for the c-plane (rate_c * thickness nm of
+    material are added above flat c-plane surfaces); m-plane and semi-polar faces advance by
+    rate_m * thickness and rate_sp * thickness respectively. A rate of 0 pins that facet's own
+    line - it never moves, however fast the other two are growing (see
+    `Geometry.deposit_faceted`'s docstring for exactly how a corner behaves when only some
+    facets are active, and the rate_c vs. rate_sp*cos(angle) relation that decides whether a
+    c-plane facet flanked by semi-polar ones widens or closes at each step).
 
-    **Pencil / pyramid tip shape**:
-    - rate_c >> rate_sp  →  c-plane grows fast upward, SP advances little  →  flat top
-    - rate_c << rate_sp  →  SP faces advance quickly and meet at a point  →  sharp tip
-    - rate_m controls how fast the wire widens laterally
+    Repeatedly applying this step (one thin layer per MQW period) wraps each layer conformally
+    around the shape as it develops - `rate_c` vs. `rate_sp`/`rate_m` decide whether that shape
+    stays a flat-topped pencil or narrows into a sharp point.
 
-    The new film is the Minkowski sum of the exposed seed surface with the Wulff growth
-    polygon (the convex hull of the three growth vectors).  This correctly produces the
-    SP corner facets connecting the c-plane top to the m-plane sides without any explicit
-    if/else logic for corners.  Applying this step repeatedly (one thin layer per MQW
-    period) wraps each layer conformally around the pencil shape.
+    `material_c`/`material_m`/`material_sp` let each facet family incorporate a different
+    material - typically the same alloy at a different composition, matching real facet-
+    dependent incorporation (e.g. more indium on the c-plane than on the semi-polar sidewalls).
+    Left unset (the default), each falls back to `material`; when all three resolve to the same
+    name this step adds one layer, otherwise one layer per distinct material, each holding only
+    the area that actually grew from that family's own facets.
 
     `seed_materials` works exactly like in `EpitaxialGrowth` (SAG selectivity).
     """
@@ -164,6 +168,9 @@ class FacetedGrowth(BaseModel):
     rate_sp: float = 0.6
     semi_polar_angle_deg: float = 30.0
     seed_materials: list[str] = Field(default_factory=list)
+    material_c: str | None = None
+    material_m: str | None = None
+    material_sp: str | None = None
 
     @model_validator(mode="after")
     def _check_rates(self) -> "FacetedGrowth":
