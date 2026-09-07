@@ -212,3 +212,36 @@ def test_lift_off_removes_metal_deposited_on_top_of_stripped_resist():
     al = next(l for l in g.layers if l.material == "Al")
     assert al.polygon.area == pytest.approx(20 * 10, abs=1.0)  # only the opening's metal survives
     assert not any(l.material == "Photoresist" for l in g.layers)
+
+
+def test_faceted_growth_with_only_c_plane_active_does_not_widen_the_sidewalls():
+    """A disabled facet (rate=0) used to inherit growth from whichever other rate's convex-hull
+    vertex happened to dominate that direction - here, before the fix, a lone c-plane vertex sat
+    on the hull's bottom edge together with the (absent) m vertices and the model crashed outright
+    (fewer than 4 coordinates for a linear ring). rate_c alone should grow straight up by exactly
+    rate_c * thickness and leave the sidewalls untouched.
+    """
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    g.deposit_faceted("GaN", thickness_nm=5.0, rate_c=1.0, rate_m=0.0, rate_sp=0.0)
+
+    solid = g.solid()
+    assert solid.bounds[0] == pytest.approx(40.0)
+    assert solid.bounds[2] == pytest.approx(60.0)
+    assert solid.bounds[3] == pytest.approx(55.0)
+
+
+def test_faceted_growth_with_only_m_plane_active_does_not_raise_the_top():
+    """Mirror of the c-only case: before the fix, a lone m vertex was absorbed into the convex
+    hull's interior (dominated by the symmetric SP-less hull collapsing to a degenerate segment)
+    and no film was produced at all. rate_m alone should widen both sidewalls by exactly
+    rate_m * thickness and leave the flat top's height untouched.
+    """
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    g.deposit_faceted("GaN", thickness_nm=5.0, rate_c=0.0, rate_m=1.0, rate_sp=0.0)
+
+    solid = g.solid()
+    assert solid.bounds[0] == pytest.approx(35.0)
+    assert solid.bounds[2] == pytest.approx(65.0)
+    assert solid.bounds[3] == pytest.approx(50.0)

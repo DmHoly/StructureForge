@@ -458,30 +458,35 @@ class Geometry:
         padded = growth_base if seed_materials else self._pad(growth_base)
 
         # --- Kinetic Wulff growth polygon ----------------------------------
-        # CCW-ordered vertices of the growth shape from a point seed at origin.
-        # The convex hull of these vectors defines how far each plane advances.
-        wulff_verts: list[tuple[float, float]] = [(0.0, 0.0)]
-        if rate_m > 0:
-            wulff_verts.append((rate_m * t, 0.0))
-        if rate_sp > 0:
-            wulff_verts.append((rate_sp * t * math.sin(theta), rate_sp * t * math.cos(theta)))
-        if rate_c > 0:
-            wulff_verts.append((0.0, rate_c * t))
-        if rate_sp > 0:
-            wulff_verts.insert(0, (-rate_sp * t * math.sin(theta), rate_sp * t * math.cos(theta)))
-        if rate_m > 0:
-            wulff_verts.insert(0, (-rate_m * t, 0.0))
-
-        wulff = _clean(Polygon(wulff_verts).convex_hull)
+        # Five fixed angular slots - m-left, sp-left, c, sp-right, m-right - each pinned to its
+        # real growth vector when the corresponding rate is > 0, or to the origin when it's
+        # exactly 0. Pinning a disabled facet to the origin (rather than omitting its slot, as a
+        # plain convex_hull of the active points used to do) fixes the two degenerate cases that
+        # used to break outright: a single active rate used to leave too few distinct points for
+        # Polygon() to even form a ring (rate_c alone raised a shapely ValueError), and a single
+        # active rate whose vertex sits exactly on the segment between two omitted ones used to
+        # vanish into the hull's interior and produce no film at all (rate_m alone).
+        #
+        # This does NOT make a disabled facet fully immovable in general: when an active rate's
+        # own vertex is taller/wider than a *smaller but still nonzero* neighbour, the Minkowski
+        # sum still advances that neighbour's facet past its own named rate (e.g. rate_c=0.1 with
+        # a large rate_sp still lifts the c-plane top by rate_sp*cos(theta), not by rate_c*t) -
+        # that leak is inherent to growing the *whole* exposed boundary by one shared polygon
+        # rather than offsetting each facet independently, and isn't fixed by vertex placement.
+        m_r = (rate_m * t, 0.0) if rate_m > 0 else (0.0, 0.0)
+        m_l = (-rate_m * t, 0.0) if rate_m > 0 else (0.0, 0.0)
+        sp_r = (rate_sp * t * math.sin(theta), rate_sp * t * math.cos(theta)) if rate_sp > 0 else (0.0, 0.0)
+        sp_l = (-rate_sp * t * math.sin(theta), rate_sp * t * math.cos(theta)) if rate_sp > 0 else (0.0, 0.0)
+        c_top = (0.0, rate_c * t) if rate_c > 0 else (0.0, 0.0)
+        wulff_verts = [m_l, sp_l, c_top, sp_r, m_r]
 
         # --- Minkowski sum: padded ⊕ wulff ---------------------------------
-        # For a convex polygon W, A⊕W = union over all points p in W of translate(A, p).
-        # Computed exactly as: translates at each vertex + sweep_union along each edge.
-        wulff_coords = list(wulff.exterior.coords)
-        pieces: list[BaseGeometry] = []
-        for vx, vy in wulff_coords[:-1]:
-            pieces.append(translate(padded, vx, vy))
-        for (x1, y1), (x2, y2) in zip(wulff_coords[:-1], wulff_coords[1:]):
+        # For a polygon W (vertices in order, not necessarily convex), A⊕W = union over all
+        # points p in W of translate(A, p). Computed exactly as: translates at each vertex +
+        # sweep_union along each edge, closing the loop back to the first vertex.
+        pieces: list[BaseGeometry] = [translate(padded, vx, vy) for vx, vy in wulff_verts]
+        closed = wulff_verts + wulff_verts[:1]
+        for (x1, y1), (x2, y2) in zip(closed, closed[1:]):
             pieces.append(sweep_union(translate(padded, x1, y1), (x2 - x1, y2 - y1)))
 
         grown = _clean(unary_union(pieces))
