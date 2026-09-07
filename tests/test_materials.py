@@ -57,11 +57,11 @@ def test_library_is_keyed_by_name_last_write_wins():
 
 def test_indium_gan_endpoints_match_visible_spectrum_ends():
     pure_gan = indium_gan(0.0)
-    pure_inn = indium_gan(1.0)
+    deep_indium = indium_gan(1.0)
     assert pure_gan.name == "In0.00Ga1.00N"
-    assert pure_inn.name == "In1.00Ga0.00N"
+    assert deep_indium.name == "In1.00Ga0.00N"
     assert pure_gan.color == "#4b0082"  # near-UV/violet spectrum stop at x=0
-    assert pure_inn.color == "#e63946"  # red spectrum stop at x=1
+    assert deep_indium.color == "#000000"  # x=1 is past the visible range - faded to black
     assert pure_gan.category is MaterialCategory.semiconductor
 
 
@@ -71,15 +71,25 @@ def test_indium_gan_density_increases_monotonically_with_fraction():
     assert low.refractive_index < mid.refractive_index < high.refractive_index
 
 
-def test_indium_gan_color_sweeps_the_visible_spectrum_with_fraction():
-    # violet -> blue -> cyan -> green -> yellow -> orange -> red: distinct colors throughout,
-    # and by the high-indium end the color should have swung solidly into the red.
-    stops = [indium_gan(x).color for x in (0.0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1.0)]
+def test_indium_gan_color_sweeps_the_visible_spectrum_within_the_realistic_range():
+    # Real In_x Ga_1-x N emission colors sit below x~0.5, so the full violet -> blue -> cyan ->
+    # green -> yellow -> orange -> red sweep is compressed into that range: distinct colors
+    # throughout, swinging solidly into red by x=0.35.
+    stops = [indium_gan(x).color for x in (0.0, 0.05, 0.10, 0.16, 0.22, 0.28, 0.35)]
     assert len(set(stops)) == len(stops)
     red = lambda m: int(m.color[1:3], 16)
     blue = lambda m: int(m.color[5:7], 16)
-    assert red(indium_gan(0.95)) > red(indium_gan(0.05))
-    assert blue(indium_gan(0.05)) > blue(indium_gan(0.95))
+    assert red(indium_gan(0.35)) > red(indium_gan(0.05))
+    assert blue(indium_gan(0.05)) > blue(indium_gan(0.35))
+
+
+def test_indium_gan_color_fades_to_black_beyond_the_visible_range():
+    # Above x~0.5 the real emission falls into the near-infrared - represented as a fade to
+    # black instead of continuing to cycle through hues.
+    assert indium_gan(0.5).color != "#000000"
+    assert indium_gan(1.0).color == "#000000"
+    red = lambda m: int(m.color[1:3], 16)
+    assert red(indium_gan(0.9)) < red(indium_gan(0.5))
 
 
 def test_indium_gan_same_fraction_is_deterministically_named():

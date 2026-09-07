@@ -172,20 +172,26 @@ _GaN_REF = {"color": "#7b6d8d", "density_g_cm3": 6.15, "refractive_index": 2.4}
 _AlN_REF = {"color": "#b0a3c9", "density_g_cm3": 3.26, "refractive_index": 2.1}
 _InN_REF = {"color": "#c1352e", "density_g_cm3": 6.81, "refractive_index": 2.9}
 
-# Indium content read as a sweep across the visible spectrum (near-UV/violet at x=0 -> red at
-# x=1), echoing the real physics of InGaN: increasing indium content shrinks the bandgap, which
-# red-shifts the corresponding emission/absorption from GaN's own near-UV edge towards visible
-# red. Stops go in actual spectral (wavelength) order - violet, blue, cyan, green, yellow,
-# orange, red - rather than any particular verbal listing of the colors, so the gradient reads
-# as a physically coherent rainbow instead of a jumbled hue cycle.
+# Indium content read as a sweep across the visible spectrum, echoing the real physics of InGaN:
+# increasing indium content shrinks the bandgap, red-shifting the emission/absorption edge from
+# GaN's own near-UV (violet) towards red - and, matching how real In_x Ga_1-x N is actually used
+# (violet/blue/green LEDs sit below x~0.3, red emitters need x~0.4-0.5, and higher fractions push
+# the emission into the near-infrared, outside the visible range), the full violet-to-red sweep
+# is compressed into x in [0, 0.5]; beyond that the color fades to black rather than continuing
+# to cycle, rather than spreading the rainbow evenly across the whole [0, 1] fraction range.
+# Stops go in actual spectral (wavelength) order - violet, blue, cyan, green, yellow, orange,
+# red - rather than any particular verbal listing of the colors, so the gradient reads as a
+# physically coherent rainbow instead of a jumbled hue cycle.
 _INDIUM_SPECTRUM: list[tuple[float, str]] = [
-    (0.0, "#4b0082"),  # near-UV / violet - pure GaN
-    (1 / 6, "#0033cc"),  # blue
-    (2 / 6, "#00b4d8"),  # cyan
-    (3 / 6, "#2ecc71"),  # green
-    (4 / 6, "#f1c40f"),  # yellow
-    (5 / 6, "#e67e22"),  # orange
-    (1.0, "#e63946"),  # red - pure InN
+    (0.00, "#4b0082"),  # near-UV / violet - pure GaN
+    (0.05, "#0033cc"),  # blue
+    (0.10, "#00b4d8"),  # cyan
+    (0.16, "#2ecc71"),  # green
+    (0.22, "#f1c40f"),  # yellow
+    (0.28, "#e67e22"),  # orange
+    (0.35, "#e63946"),  # red
+    (0.50, "#2a0a0a"),  # deep red fading towards black
+    (1.00, "#000000"),  # black - beyond the visible range (near-infrared), high indium content
 ]
 
 
@@ -222,9 +228,10 @@ def indium_gan(
     produce an identically-named `Material` - safe to register into a `MaterialLibrary` once per
     call site (e.g. once per MQW period) without colliding or needing to de-duplicate by hand.
     Color sweeps the visible spectrum from near-UV/violet (x=0, pure GaN) through blue, cyan,
-    green, yellow, orange to red (x=1, pure InN) - see `_INDIUM_SPECTRUM` - so a stack of
-    increasing In content reads, at a glance, as a physically-ordered rainbow: the color *is*
-    the composition, not just a label for it.
+    green, yellow, orange to red - compressed into x in [0, 0.5], matching real In_x Ga_1-x N
+    emission colors, then fading to black for x above that (near-infrared, outside the visible
+    range) - see `_INDIUM_SPECTRUM`. A stack of increasing In content reads, at a glance, as a
+    physically-ordered rainbow: the color *is* the composition, not just a label for it.
     """
     return _ternary_nitride(
         "In",
