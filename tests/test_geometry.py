@@ -1,5 +1,8 @@
+import math
+
 import pytest
-from shapely.geometry import Point, box
+from shapely.geometry import Point, Polygon, box
+from shapely.ops import unary_union
 
 from structureforge.geometry.engine import Geometry, Layer
 
@@ -215,11 +218,10 @@ def test_lift_off_removes_metal_deposited_on_top_of_stripped_resist():
 
 
 def test_faceted_growth_with_only_c_plane_active_does_not_widen_the_sidewalls():
-    """A disabled facet (rate=0) used to inherit growth from whichever other rate's convex-hull
-    vertex happened to dominate that direction - here, before the fix, a lone c-plane vertex sat
-    on the hull's bottom edge together with the (absent) m vertices and the model crashed outright
-    (fewer than 4 coordinates for a linear ring). rate_c alone should grow straight up by exactly
-    rate_c * thickness and leave the sidewalls untouched.
+    """`deposit_faceted` offsets each facet along its own outward normal independently, so a rate
+    of 0 pins that facet's line outright rather than leaking growth from whichever other rate's
+    shared growth vector used to dominate that direction. rate_c alone should grow straight up by
+    exactly rate_c * thickness and leave the sidewalls untouched.
     """
     g = Geometry(domain_width_nm=100)
     g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
@@ -232,9 +234,7 @@ def test_faceted_growth_with_only_c_plane_active_does_not_widen_the_sidewalls():
 
 
 def test_faceted_growth_with_only_m_plane_active_does_not_raise_the_top():
-    """Mirror of the c-only case: before the fix, a lone m vertex was absorbed into the convex
-    hull's interior (dominated by the symmetric SP-less hull collapsing to a degenerate segment)
-    and no film was produced at all. rate_m alone should widen both sidewalls by exactly
+    """Mirror of the c-only case: rate_m alone should widen both sidewalls by exactly
     rate_m * thickness and leave the flat top's height untouched.
     """
     g = Geometry(domain_width_nm=100)
@@ -245,3 +245,64 @@ def test_faceted_growth_with_only_m_plane_active_does_not_raise_the_top():
     assert solid.bounds[0] == pytest.approx(35.0)
     assert solid.bounds[2] == pytest.approx(65.0)
     assert solid.bounds[3] == pytest.approx(50.0)
+
+
+def test_faceted_growth_pure_sp_extends_an_already_pointed_tip_without_touching_the_sidewalls():
+    """The actual motivating case: a crystal that has already come to a sharp point (no c-plane or
+    m-plane facet left to pin) should be extendable by growing *only* the SP facets - the reported
+    bug was that this always dragged the c-plane/sidewalls along for the ride too. With rate_c =
+    rate_m = 0 there's nothing left for the SP facets to advance against but each other, so the
+    apex should rise by exactly thickness / cos(angle) each step while the sidewalls stay put.
+    """
+    angle_deg = 30.0
+    theta = math.radians(angle_deg)
+    apex_y = 50 + 10 * math.tan(theta)
+    seed = unary_union([box(40, 0, 60, 50), Polygon([(40, 50), (60, 50), (50, apex_y)])])
+
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=seed))
+    for _ in range(3):
+        g.deposit_faceted(
+            "GaN", thickness_nm=2.0, rate_c=0.0, rate_m=0.0, rate_sp=1.0, semi_polar_angle_deg=angle_deg
+        )
+
+    solid = g.solid()
+    assert solid.geom_type == "Polygon"
+    assert solid.bounds[0] == pytest.approx(40.0)
+    assert solid.bounds[2] == pytest.approx(60.0)
+    assert solid.bounds[3] == pytest.approx(apex_y + 3 * 2.0 / math.cos(theta))
+
+
+def test_faceted_growth_small_c_rate_is_not_overridden_by_a_much_larger_sp_rate():
+    """A small (but nonzero) rate_c must still cap the c-plane's own line at rate_c * thickness,
+    no matter how much faster the flanking SP facets are growing - each facet's line moves at its
+    own named rate, full stop, not at whatever the fastest neighbour reaches. Checked away from the
+    corners (dead centre of the original top edge), since a corner's own height is legitimately
+    free to be pulled up by a much faster neighbouring facet meeting a pinned one there - it's the
+    facet's own line, not the silhouette's overall bounds, that a rate of 0 (or a small rate)
+    guarantees.
+    """
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    g.deposit_faceted("GaN", thickness_nm=5.0, rate_c=0.2, rate_m=0.3, rate_sp=3.0, semi_polar_angle_deg=30.0)
+
+    solid = g.solid()
+    c_plane_y = 50.0 + 0.2 * 5.0
+    assert solid.contains(Point(50.0, c_plane_y - 0.5))
+    assert not solid.contains(Point(50.0, c_plane_y + 0.5))
+
+
+def test_faceted_growth_mitre_bevels_instead_of_blowing_up_at_a_lopsided_rate_ratio():
+    """A mitre join between two very unevenly-advancing facets at a shallow angle can shoot out to
+    many times either facet's own distance (the classic miter-join blowup - see `mitre_or_bevel`).
+    A tiny rate_c next to a much larger rate_sp is exactly that case; the film must stay within a
+    sane multiple of the larger rate's own reach rather than spanning most of the domain.
+    """
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    g.deposit_faceted("GaN", thickness_nm=5.0, rate_c=0.1, rate_m=0.0, rate_sp=5.0, semi_polar_angle_deg=30.0)
+
+    solid = g.solid()
+    max_reach = 5.0 * 5.0  # rate_sp * thickness, generously bounding how far any facet should reach
+    assert solid.bounds[0] > 40.0 - 3 * max_reach
+    assert solid.bounds[2] < 60.0 + 3 * max_reach

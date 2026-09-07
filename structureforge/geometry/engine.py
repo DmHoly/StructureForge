@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from shapely.affinity import scale, translate
 from shapely.geometry import MultiPolygon, Polygon, box
 from shapely.geometry.base import BaseGeometry
+from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 
 from ..core.materials import MaterialLibrary
@@ -73,6 +74,139 @@ def sweep_union(geom: BaseGeometry, vector: tuple[float, float]) -> BaseGeometry
                 pieces.append(
                     Polygon([(x1, y1), (x2, y2), (x2 + vector[0], y2 + vector[1]), (x1 + vector[0], y1 + vector[1])])
                 )
+    return _clean(unary_union(pieces))
+
+
+def _offset_named_facets(
+    solid: BaseGeometry, named_directions: list[tuple[float, float, float]]
+) -> BaseGeometry:
+    """Advance each straight edge of `solid`'s exterior ring(s) along its own outward normal by
+    the distance named for that exact direction in `named_directions` (nx, ny, distance) - 0 (or
+    absent) for any direction not meant to move. Every other edge (any normal not in the list at
+    all) is left exactly where it is.
+
+    This is a per-facet offset, not a global one. For each vertex, the two adjacent edges' offset
+    lines (plus, at a convex corner, any named direction whose normal cone falls strictly between
+    them and isn't already an edge there - inserted as new facet(s), splitting the corner into a
+    short chain of mitre points) are intersected pairwise, giving that vertex a `near` point (where
+    its incoming edge's line meets the chain) and a `far` point (where the chain meets its outgoing
+    edge's line). Two pieces per vertex/edge reconstruct the grown boundary: a mitre-fill polygon
+    fanned from the vertex through its whole chain whenever more than one point was needed there,
+    and - for every edge with a nonzero distance - a strip from that edge's own two endpoints to
+    its neighbours' `far`/`near` points. A zero-distance edge needs neither: it's already part of
+    `solid`, unchanged, and its neighbours' own strips/fans butt up against its two endpoints as-is.
+
+    This gives a rate of 0 a real guarantee a shared global growth vector never could: that facet's
+    *own line* never moves, no matter how far a neighbouring facet advances - only how much of it
+    stays exposed can change (e.g. flanking SP facets eating into a c-plane top as they grow, or a
+    facet nucleating from scratch at a bare corner the first time a direction with no prior edge
+    there gets a positive rate).
+
+    Reflex (concave) corners never sprout a new facet - the two adjacent offset lines are mitred
+    directly, since a concave corner's normal cone points back into the solid, not out into growth
+    space.
+
+    A mitre between two very unevenly-advancing facets at a shallow angle can land far outside
+    anything either facet actually moved (the classic miter-join blowup); when a candidate mitre
+    point would land past `1.5 * (d1 + d2)` from the vertex, `mitre_or_bevel` bevels that corner
+    instead - the two facets' plain per-line offsets, joined by a short straight cut - rather than
+    chase a point that distant.
+    """
+    named_directions = [(nx, ny, d) for nx, ny, d in named_directions if d > 1e-9]
+    named = [(nx, ny, d, math.atan2(ny, nx)) for nx, ny, d in named_directions]
+
+    def classify(nx: float, ny: float) -> float:
+        for dx, dy, d, _ang in named:
+            if abs(nx - dx) < 1e-4 and abs(ny - dy) < 1e-4:
+                return d
+        return 0.0
+
+    def mitre_or_bevel(
+        v: tuple[float, float], n1: tuple[float, float], d1: float, n2: tuple[float, float], d2: float
+    ) -> list[tuple[float, float]]:
+        """The point where offset lines n1@d1 and n2@d2 (both measured from `v`) cross - or, if
+        that crossing lands unreasonably far out (near-tangent normals paired with very unequal
+        distances - e.g. a barely-active facet next to a fast one, at a shallow angle between
+        them), two points instead: the plain per-line offsets, bevelling the corner rather than
+        chasing a mitre point that could otherwise land tens of times further out than either
+        facet actually advanced.
+        """
+        p1 = (v[0] + n1[0] * d1, v[1] + n1[1] * d1)
+        p2 = (v[0] + n2[0] * d2, v[1] + n2[1] * d2)
+        a, b = n1
+        c, d = n2
+        det = a * d - b * c
+        if abs(det) < 1e-9:
+            return [p1]
+        px = (d1 * d - b * d2) / det
+        py = (a * d2 - c * d1) / det
+        point = (v[0] + px, v[1] + py)
+        if math.hypot(point[0] - v[0], point[1] - v[1]) > 1.5 * (d1 + d2):
+            return [p1, p2]
+        return [point]
+
+    def between_ccw(angle: float, lo: float, hi: float) -> bool:
+        span = (hi - lo) % (2 * math.pi)
+        rel = (angle - lo) % (2 * math.pi)
+        return 1e-9 < rel < span - 1e-9
+
+    parts = list(solid.geoms) if isinstance(solid, MultiPolygon) else [solid]
+    pieces: list[BaseGeometry] = [solid]
+    for part in parts:
+        part = orient(part, sign=1.0)
+        coords = list(part.exterior.coords)[:-1]
+        coords = [p for i, p in enumerate(coords) if p != coords[i - 1]]
+        n = len(coords)
+        if n < 3:
+            continue
+
+        normals: list[tuple[float, float]] = []
+        dists: list[float] = []
+        for i in range(n):
+            x1, y1 = coords[i]
+            x2, y2 = coords[(i + 1) % n]
+            length = math.hypot(x2 - x1, y2 - y1)
+            nx, ny = (y2 - y1) / length, -(x2 - x1) / length
+            normals.append((nx, ny))
+            dists.append(classify(nx, ny))
+
+        near_pt: list[tuple[float, float]] = [(0.0, 0.0)] * n
+        far_pt: list[tuple[float, float]] = [(0.0, 0.0)] * n
+        for i in range(n):
+            v = coords[i]
+            n_in, d_in = normals[i - 1], dists[i - 1]
+            n_out, d_out = normals[i], dists[i]
+            edge_in_dir = (-n_in[1], n_in[0])
+            edge_out_dir = (-n_out[1], n_out[0])
+            convex = edge_in_dir[0] * edge_out_dir[1] - edge_in_dir[1] * edge_out_dir[0] > 1e-9
+
+            chain = [(n_in[0], n_in[1], d_in)]
+            if convex:
+                ang_in = math.atan2(n_in[1], n_in[0])
+                ang_out = math.atan2(n_out[1], n_out[0])
+                extras = sorted(
+                    ((nx, ny, d, ang) for nx, ny, d, ang in named if between_ccw(ang, ang_in, ang_out)),
+                    key=lambda e: (e[3] - ang_in) % (2 * math.pi),
+                )
+                chain.extend((nx, ny, d) for nx, ny, d, _ang in extras)
+            chain.append((n_out[0], n_out[1], d_out))
+
+            mitre_points = [
+                p
+                for (nx1, ny1, d1), (nx2, ny2, d2) in zip(chain, chain[1:])
+                for p in mitre_or_bevel(v, (nx1, ny1), d1, (nx2, ny2), d2)
+            ]
+            near_pt[i] = mitre_points[0]
+            far_pt[i] = mitre_points[-1]
+            if len(mitre_points) > 1:
+                pieces.append(Polygon([v, *mitre_points]).buffer(0))
+
+        for i in range(n):
+            if dists[i] <= 0:
+                continue
+            v_i, v_next = coords[i], coords[(i + 1) % n]
+            pieces.append(Polygon([v_i, v_next, near_pt[(i + 1) % n], far_pt[i]]).buffer(0))
+
     return _clean(unary_union(pieces))
 
 
@@ -402,21 +536,34 @@ class Geometry:
         semi_polar_angle_deg: float = 30.0,
         seed_materials: list[str] | None = None,
     ) -> None:
-        """Kinetic-Wulff faceted growth: add `material` by advancing three crystal-plane
-        families simultaneously at different speeds.
+        """Faceted growth: add `material` by advancing three crystal-plane families - c-plane
+        {0001} (`rate_c`), m-plane {10-10} sidewalls (`rate_m`), and semi-polar facets at
+        `semi_polar_angle_deg` from the c-axis (`rate_sp`) - each strictly along its own outward
+        normal, independently of the other two.
 
-        The growth shape for one nominal unit of thickness is the convex hull of:
-          - (0, rate_c * t)          — c-plane {0001} top
-          - (±rate_m * t, 0)         — m-plane {10-10} sidewalls
-          - (±rate_sp*t*sin(θ), rate_sp*t*cos(θ))  — semi-polar facets at θ=semi_polar_angle_deg
+        Concretely: every straight edge of the current exposed surface whose outward normal is
+        exactly (0,1) [c], (±1,0) [m] or (±sin θ,cos θ) [sp] advances by that facet's own
+        rate * thickness_nm; every other edge - including a facet whose own rate is 0 - doesn't
+        move at all. Where an existing corner's normal cone spans one of these three directions
+        without already having an edge there (e.g. a bare 90 degree corner the first time it
+        grows), a brand new facet is inserted exactly at that angle instead of being interpolated
+        from its neighbours.
 
-        The new film = Minkowski sum of the exposed seed surface with this Wulff polygon,
-        minus the already-existing solid.  Repeatedly applying thin layers (small `thickness_nm`)
-        produces conformal MQW stacks that faithfully follow the pencil/pyramid shape.
+        Setting a rate to 0 therefore *pins* that facet's own line - it never rises, widens, or
+        otherwise moves, no matter what the other two rates are doing. Its exposed *extent* can
+        still change, though: pure `rate_sp` growth on an already-formed sharp point (rate_c =
+        rate_m = 0, no c-plane or sidewall left to pin) extends that point further along the SP
+        direction with the sidewalls exactly where they were - the common case once a tip has
+        actually formed. Applied instead to a seed that *still has* a flat c-plane top, the pinned
+        c-plane and m-plane lines bound how far the flanking SP facets can advance into the
+        existing chamfer; since neither line can move to meet them, growing SP alone there erodes
+        the chamfer back down (the corners it occupied revert to the pinned lines, so the c-plane's
+        exposed width actually grows) rather than sharpening the tip - closing a flat top into a
+        point takes the flanking rate (m and/or c) that made it narrower in the first place, not a
+        positive rate_sp on its own.
 
-        - rate_c >> rate_sp  →  c-plane wins, flat-top pencil
-        - rate_c << rate_sp  →  SP faces meet at a point, sharp pyramidal tip
-        - rate_m controls lateral widening per layer
+        Repeatedly applying thin layers (small `thickness_nm`) produces conformal MQW stacks that
+        faithfully follow the pencil/pyramid shape as it develops.
 
         `seed_materials` enables SAG selectivity (same semantics as `deposit_epitaxial`).
         """
@@ -457,45 +604,20 @@ class Geometry:
         # SAG: never bulk-pad the seed (same reason as deposit_epitaxial).
         padded = growth_base if seed_materials else self._pad(growth_base)
 
-        # --- Kinetic Wulff growth polygon ----------------------------------
-        # Five fixed angular slots - m-left, sp-left, c, sp-right, m-right - each pinned to its
-        # real growth vector when the corresponding rate is > 0, or to the origin when it's
-        # exactly 0. Pinning a disabled facet to the origin (rather than omitting its slot, as a
-        # plain convex_hull of the active points used to do) fixes the two degenerate cases that
-        # used to break outright: a single active rate used to leave too few distinct points for
-        # Polygon() to even form a ring (rate_c alone raised a shapely ValueError), and a single
-        # active rate whose vertex sits exactly on the segment between two omitted ones used to
-        # vanish into the hull's interior and produce no film at all (rate_m alone).
-        #
-        # This does NOT make a disabled facet fully immovable in general: when an active rate's
-        # own vertex is taller/wider than a *smaller but still nonzero* neighbour, the Minkowski
-        # sum still advances that neighbour's facet past its own named rate (e.g. rate_c=0.1 with
-        # a large rate_sp still lifts the c-plane top by rate_sp*cos(theta), not by rate_c*t) -
-        # that leak is inherent to growing the *whole* exposed boundary by one shared polygon
-        # rather than offsetting each facet independently, and isn't fixed by vertex placement.
-        m_r = (rate_m * t, 0.0) if rate_m > 0 else (0.0, 0.0)
-        m_l = (-rate_m * t, 0.0) if rate_m > 0 else (0.0, 0.0)
-        sp_r = (rate_sp * t * math.sin(theta), rate_sp * t * math.cos(theta)) if rate_sp > 0 else (0.0, 0.0)
-        sp_l = (-rate_sp * t * math.sin(theta), rate_sp * t * math.cos(theta)) if rate_sp > 0 else (0.0, 0.0)
-        c_top = (0.0, rate_c * t) if rate_c > 0 else (0.0, 0.0)
-        wulff_verts = [m_l, sp_l, c_top, sp_r, m_r]
+        named_directions = [
+            (0.0, 1.0, rate_c * t),
+            (1.0, 0.0, rate_m * t),
+            (-1.0, 0.0, rate_m * t),
+            (math.sin(theta), math.cos(theta), rate_sp * t),
+            (-math.sin(theta), math.cos(theta), rate_sp * t),
+        ]
+        grown = _offset_named_facets(padded, named_directions)
 
-        # --- Minkowski sum: padded ⊕ wulff ---------------------------------
-        # For a polygon W (vertices in order, not necessarily convex), A⊕W = union over all
-        # points p in W of translate(A, p). Computed exactly as: translates at each vertex +
-        # sweep_union along each edge, closing the loop back to the first vertex.
-        pieces: list[BaseGeometry] = [translate(padded, vx, vy) for vx, vy in wulff_verts]
-        closed = wulff_verts + wulff_verts[:1]
-        for (x1, y1), (x2, y2) in zip(closed, closed[1:]):
-            pieces.append(sweep_union(translate(padded, x1, y1), (x2 - x1, y2 - y1)))
-
-        grown = _clean(unary_union(pieces))
-
-        max_reach = max(rate_c, rate_sp) * t
+        max_reach = t * (rate_c + rate_m + rate_sp) / max(math.cos(theta), 0.05) + 1.0
         film = self._crop(
             _clean(grown.difference(padded)),
             y_min - t,
-            y_max + max_reach + 1.0,
+            y_max + max_reach,
         )
         film = _drop_tiny(_clean(film.difference(solid)))
 
