@@ -55,23 +55,31 @@ def test_library_is_keyed_by_name_last_write_wins():
     assert lib.get("X").category is MaterialCategory.metal
 
 
-def test_indium_gan_endpoints_match_gan_and_high_indium_reference_colors():
+def test_indium_gan_endpoints_match_visible_spectrum_ends():
     pure_gan = indium_gan(0.0)
     pure_inn = indium_gan(1.0)
     assert pure_gan.name == "In0.00Ga1.00N"
     assert pure_inn.name == "In1.00Ga0.00N"
-    assert pure_gan.color == "#7b6d8d"  # GaN's own library color
-    assert pure_inn.color != pure_gan.color
+    assert pure_gan.color == "#4b0082"  # near-UV/violet spectrum stop at x=0
+    assert pure_inn.color == "#e63946"  # red spectrum stop at x=1
     assert pure_gan.category is MaterialCategory.semiconductor
 
 
-def test_indium_gan_color_and_density_increase_monotonically_with_fraction():
+def test_indium_gan_density_increases_monotonically_with_fraction():
     low, mid, high = indium_gan(0.1), indium_gan(0.3), indium_gan(0.6)
     assert low.density_g_cm3 < mid.density_g_cm3 < high.density_g_cm3
     assert low.refractive_index < mid.refractive_index < high.refractive_index
-    # red channel should climb toward InN's deep red as indium content rises
+
+
+def test_indium_gan_color_sweeps_the_visible_spectrum_with_fraction():
+    # violet -> blue -> cyan -> green -> yellow -> orange -> red: distinct colors throughout,
+    # and by the high-indium end the color should have swung solidly into the red.
+    stops = [indium_gan(x).color for x in (0.0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1.0)]
+    assert len(set(stops)) == len(stops)
     red = lambda m: int(m.color[1:3], 16)
-    assert red(low) < red(mid) < red(high)
+    blue = lambda m: int(m.color[5:7], 16)
+    assert red(indium_gan(0.95)) > red(indium_gan(0.05))
+    assert blue(indium_gan(0.05)) > blue(indium_gan(0.95))
 
 
 def test_indium_gan_same_fraction_is_deterministically_named():

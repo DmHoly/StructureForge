@@ -145,6 +145,22 @@ def _lerp_color(color_a: str, color_b: str, t: float) -> str:
     return "#" + "".join(f"{c:02x}" for c in channels)
 
 
+def _spectral_color(t: float, stops: list[tuple[float, str]]) -> str:
+    """Piecewise-linear blend across `stops` (sorted, ascending `t` in [0, 1]) - a multi-point
+    generalization of `_lerp_color`'s single blend, used to sweep a composition fraction across
+    a whole visible-spectrum palette instead of just two end colors.
+    """
+    if t <= stops[0][0]:
+        return stops[0][1]
+    if t >= stops[-1][0]:
+        return stops[-1][1]
+    for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+        if t0 <= t <= t1:
+            local_t = (t - t0) / (t1 - t0)
+            return _lerp_color(c0, c1, local_t)
+    return stops[-1][1]  # pragma: no cover - unreachable, t is within [stops[0][0], stops[-1][0]]
+
+
 # Reference points for the two ternary III-N alloys the library parameterizes - not full
 # `Material` entries of their own (the library only stocks the binaries it actually needs
 # elsewhere, GaN and AlN; InN would exist solely to anchor this interpolation). Density and
@@ -156,17 +172,41 @@ _GaN_REF = {"color": "#7b6d8d", "density_g_cm3": 6.15, "refractive_index": 2.4}
 _AlN_REF = {"color": "#b0a3c9", "density_g_cm3": 3.26, "refractive_index": 2.1}
 _InN_REF = {"color": "#c1352e", "density_g_cm3": 6.81, "refractive_index": 2.9}
 
+# Indium content read as a sweep across the visible spectrum (near-UV/violet at x=0 -> red at
+# x=1), echoing the real physics of InGaN: increasing indium content shrinks the bandgap, which
+# red-shifts the corresponding emission/absorption from GaN's own near-UV edge towards visible
+# red. Stops go in actual spectral (wavelength) order - violet, blue, cyan, green, yellow,
+# orange, red - rather than any particular verbal listing of the colors, so the gradient reads
+# as a physically coherent rainbow instead of a jumbled hue cycle.
+_INDIUM_SPECTRUM: list[tuple[float, str]] = [
+    (0.0, "#4b0082"),  # near-UV / violet - pure GaN
+    (1 / 6, "#0033cc"),  # blue
+    (2 / 6, "#00b4d8"),  # cyan
+    (3 / 6, "#2ecc71"),  # green
+    (4 / 6, "#f1c40f"),  # yellow
+    (5 / 6, "#e67e22"),  # orange
+    (1.0, "#e63946"),  # red - pure InN
+]
+
 
 def _ternary_nitride(
-    symbol: str, param_name: str, fraction: float, other_ref: dict, *, category: MaterialCategory, notes: str | None
+    symbol: str,
+    param_name: str,
+    fraction: float,
+    other_ref: dict,
+    *,
+    category: MaterialCategory,
+    notes: str | None,
+    color_fn=None,
 ) -> Material:
     if not 0.0 <= fraction <= 1.0:
         raise ValueError(f"{param_name} must be in [0, 1], got {fraction}")
     name = f"{symbol}{fraction:.2f}Ga{1 - fraction:.2f}N"
+    color = color_fn(fraction) if color_fn is not None else _lerp_color(_GaN_REF["color"], other_ref["color"], fraction)
     return Material(
         name=name,
         category=category,
-        color=_lerp_color(_GaN_REF["color"], other_ref["color"], fraction),
+        color=color,
         density_g_cm3=_lerp(_GaN_REF["density_g_cm3"], other_ref["density_g_cm3"], fraction),
         refractive_index=_lerp(_GaN_REF["refractive_index"], other_ref["refractive_index"], fraction),
         notes=notes or f"{name} - linear Vegard's-law estimate between GaN and {symbol}N.",
@@ -181,11 +221,20 @@ def indium_gan(
     Named `In{x:.2f}Ga{1-x:.2f}N`, so two calls with the same fraction (rounded to 2 decimals)
     produce an identically-named `Material` - safe to register into a `MaterialLibrary` once per
     call site (e.g. once per MQW period) without colliding or needing to de-duplicate by hand.
-    Color is a straight RGB blend from GaN's own library color toward a deep-red "high indium"
-    reference, so a stack of increasing In content reads, at a glance, as a red-shifting
-    gradient - the color *is* the composition, not just a label for it.
+    Color sweeps the visible spectrum from near-UV/violet (x=0, pure GaN) through blue, cyan,
+    green, yellow, orange to red (x=1, pure InN) - see `_INDIUM_SPECTRUM` - so a stack of
+    increasing In content reads, at a glance, as a physically-ordered rainbow: the color *is*
+    the composition, not just a label for it.
     """
-    return _ternary_nitride("In", "indium fraction", indium_fraction, _InN_REF, category=category, notes=notes)
+    return _ternary_nitride(
+        "In",
+        "indium fraction",
+        indium_fraction,
+        _InN_REF,
+        category=category,
+        notes=notes,
+        color_fn=lambda x: _spectral_color(x, _INDIUM_SPECTRUM),
+    )
 
 
 def aluminum_gan(
