@@ -6,9 +6,10 @@ Deux géométries de pointe côte à côte dans un seul SVG, obtenues en appliqu
 masque SiO2 SAG + court pilier GaN) - la forme du crayon est un résultat de la simulation,
 pas une formule géométrique écrite à la main :
 
-  • Pointe plate  : rate_c dominant → le sommet C reste large, le chanfrein SP grignote peu.
-  • Pointe aiguë  : rate_c nul, rate_sp dominant → les facettes SP referment le sommet en une
-                    couronne facettée avant que le plan C n'ait eu la moindre chance de suivre.
+  • Pointe plate  : rate_m modeste face à rate_c → le sommet C reste large, à peine chanfreiné.
+  • Pointe aiguë  : rate_m nettement plus grand, rate_c > rate_sp*cos(θ) → les flancs s'évasent
+                    vite pendant que le sommet C, qui n'avance pas aussi vite que l'exigerait
+                    la facette SP, se referme en pointe.
 
 Les puits quantiques (MQW) sont ajoutés par les mêmes incréments de `deposit_faceted`, avec
 les trois taux égaux (croissance conforme) et sélectifs au GaN/InGaN déjà exposé (SAG) - ils
@@ -73,10 +74,14 @@ def _seed_geometry() -> Geometry:
 
 def build_pencil(rate_c: float, rate_m: float, rate_sp: float, step_thicknesses: list[float]) -> Geometry:
     """Fait croître le crayon depuis le germe via `deposit_faceted`, un appel par épaisseur de
-    `step_thicknesses` - une croissance faible en plan C mais rapide en SP referme le sommet en
-    pointe (le plan C n'a jamais le temps de suivre); l'inverse laisse un sommet plat, juste
-    chanfreiné aux coins. La sélectivité SAG (`seed_materials`) confine toute la croissance au
-    GaN déjà exposé, comme le ferait un vrai masque SiO2.
+    `step_thicknesses`. `rate_m` ne fait qu'évaser les flancs (il ne change pas la vitesse à
+    laquelle le sommet se referme) ; ce qui décide si le sommet C rétrécit ou s'élargit à chaque
+    pas est uniquement le rapport rate_c / rate_sp : tant que rate_c > rate_sp*cos(θ), la facette
+    SP avance verticalement moins vite que le plan C, donc le coin où elle rencontre le plan C se
+    rapproche du centre à chaque pas - un `rate_m` généreux donne alors un évasement net suivi
+    d'une pointe franche. Si cette condition s'inverse (rate_sp*cos(θ) > rate_c), le sommet C
+    s'élargit au lieu de rétrécir. La sélectivité SAG (`seed_materials`) confine toute la
+    croissance au GaN déjà exposé, comme le ferait un vrai masque SiO2.
 
     Volontairement peu d'incréments, mais chacun plus épais, plutôt que beaucoup de pas fins :
     `_offset_named_facets` mitre chaque nouveau coin à partir du contour déjà déformé par le pas
@@ -353,11 +358,11 @@ def main() -> None:
     print("Croissance pointe plate  (rate_c=1.0, rate_m=0.4, rate_sp=0.7) …")
     g_flat = build_pencil(rate_c=1.0, rate_m=0.4, rate_sp=0.7, step_thicknesses=[8.0, 8.0])
 
-    print("Croissance pointe aiguë  (rate_c=0.0, rate_m=0.15, rate_sp=1.2) …")
-    g_sharp = build_pencil(rate_c=0.0, rate_m=0.15, rate_sp=1.2, step_thicknesses=[6.0, 6.0, 6.0, 6.0])
+    print("Croissance pointe aiguë  (rate_c=1.0, rate_m=0.8, rate_sp=0.6) …")
+    g_sharp = build_pencil(rate_c=1.0, rate_m=0.8, rate_sp=0.6, step_thicknesses=[3.0] * 7)
 
-    label_flat  = f"Pointe plate   rate_c=1.0 / rate_sp=0.7 / {SP_ANGLE_DEG:.0f}°"
-    label_sharp = f"Pointe aiguë   rate_sp=1.2 / rate_c=0.0 / {SP_ANGLE_DEG:.0f}°"
+    label_flat  = "Pointe plate — c=1.0 / m=0.4 / sp=0.7"
+    label_sharp = "Pointe aiguë — c=1.0 / m=0.8 / sp=0.6"
     frame_flat  = geometry_to_frame(g_flat, label_flat)
     frame_sharp = geometry_to_frame(g_sharp, label_sharp)
 
