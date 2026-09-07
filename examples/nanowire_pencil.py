@@ -242,7 +242,10 @@ def build_combined_svg(scenarios: list[Scenario]) -> str:
     ax_off  = 36.0   # space for y-axis labels
 
     n      = len(scenarios)
-    svg_w  = ax_off + n * panel_w + (n - 1) * _GAP + 4
+    box_s  = 5.0
+    leg_gap = 2.0
+    legend_width = sum(box_s + leg_gap + len(mat) * _TICK_FONT * 0.62 + 8.0 for mat in COLORS)
+    svg_w  = max(ax_off + n * panel_w + (n - 1) * _GAP + 4, ax_off + legend_width + 8.0)
     svg_h  = panel_h + 30     # for title above + legend below
 
     lines = [
@@ -313,8 +316,6 @@ def build_combined_svg(scenarios: list[Scenario]) -> str:
     # -- legend ---------------------------------------------------------------
     leg_x = ax_off
     leg_y = 16.0 + panel_h + 6.0
-    box_s = 5.0
-    gap   = 2.0
     x_cur = leg_x
     for mat, color in COLORS.items():
         lines.append(
@@ -322,10 +323,10 @@ def build_combined_svg(scenarios: list[Scenario]) -> str:
             f'fill="{color}" stroke="rgba(0,0,0,0.3)" stroke-width="0.4"/>'
         )
         lines.append(
-            f'<text x="{x_cur + box_s + gap:.1f}" y="{leg_y + box_s * 0.85:.1f}" '
+            f'<text x="{x_cur + box_s + leg_gap:.1f}" y="{leg_y + box_s * 0.85:.1f}" '
             f'font-size="{_TICK_FONT}" fill="{_LABEL_CLR}">{mat}</text>'
         )
-        x_cur += box_s + gap + len(mat) * _TICK_FONT * 0.62 + 8.0
+        x_cur += box_s + leg_gap + len(mat) * _TICK_FONT * 0.62 + 8.0
 
     # -- scale bar ------------------------------------------------------------
     bar_x = svg_w - 8 - _SCALE_BAR
