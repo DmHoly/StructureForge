@@ -106,6 +106,9 @@ def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, re
         )
     elif isinstance(step, FacetedGrowth):
         materials.get(step.material)
+        for override in (step.material_c, step.material_m, step.material_sp):
+            if override is not None:
+                materials.get(override)
         geometry.deposit_faceted(
             step.material,
             step.thickness.to_nm(),
@@ -114,6 +117,9 @@ def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, re
             rate_sp=step.rate_sp,
             semi_polar_angle_deg=step.semi_polar_angle_deg,
             seed_materials=list(step.seed_materials) if step.seed_materials else None,
+            material_c=step.material_c,
+            material_m=step.material_m,
+            material_sp=step.material_sp,
         )
     elif isinstance(step, Flip):
         geometry.flip()

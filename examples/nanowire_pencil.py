@@ -1,15 +1,19 @@
-"""Nanowire en crayon — vue en coupe 2D (III-N nitride, plan C).
+"""Nanowire en crayon — vue en coupe 2D (III-N nitride, plan C), simulé via le vrai moteur.
 
-Deux géométries de pointe côte à côte dans un seul SVG :
+Deux géométries de pointe côte à côte dans un seul SVG, obtenues en appliquant
+`Geometry.deposit_faceted` en petits incréments répétés (comme le ferait un pas
+`FacetedGrowth` réel dans un pipeline de simulation) sur un germe identique (substrat +
+masque SiO2 SAG + court pilier GaN) - la forme du crayon est un résultat de la simulation,
+pas une formule géométrique écrite à la main :
 
-  • Pointe plate  : plan C rapide → le sommet reste plat, petits chanfreins SP aux coins.
-  • Pointe aiguë : plan SP rapide → les facettes SP convergent en pyramide avant que
-                   le plan C ait le temps de « rattraper ».
+  • Pointe plate  : rate_m modeste face à rate_c → le sommet C reste large, à peine chanfreiné.
+  • Pointe aiguë  : rate_m nettement plus grand, rate_c > rate_sp*cos(θ) → les flancs s'évasent
+                    vite pendant que le sommet C, qui n'avance pas aussi vite que l'exigerait
+                    la facette SP, se referme en pointe.
 
-La géométrie du crayon est construite directement par calcul de Wulff analytique depuis
-le bord supérieur du pilier (surface exposée), plus réaliste qu'un Minkowski sum depuis
-toute la hauteur du pilier.  Les puits quantiques (MQW) sont ajoutés par buffer Shapely
-pour être conformes à la forme du crayon.
+Les puits quantiques (MQW) sont ajoutés par les mêmes incréments de `deposit_faceted`, avec
+les trois taux égaux (croissance conforme) et sélectifs au GaN/InGaN déjà exposé (SAG) - ils
+suivent donc fidèlement la forme du crayon, plate ou pointue, telle qu'elle a émergé.
 
 Run : python examples/nanowire_pencil.py
 SVG : examples/output/nanowire_pencil.svg
@@ -21,20 +25,20 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
-from shapely.geometry import Polygon, box
+from shapely.geometry import box
 from shapely.ops import unary_union
 
-from structureforge.geometry.engine import Layer
+from structureforge.geometry.engine import Geometry, Layer
 from structureforge.process.simulate import Frame
 
 # ---------------------------------------------------------------------------
 # Paramètres communs
 # ---------------------------------------------------------------------------
 DOMAIN_NM = 140.0
-SUBSTRATE_H = 15.0       # épaisseur substrat GaN
-MASK_H = 40.0            # épaisseur masque SiO2
-PILLAR_H = 80.0          # hauteur du corps rectangulaire (m-plane walls)
-W = 20.0                 # largeur de la fenêtre SAG / du pilier
+SUBSTRATE_H = 15.0      # épaisseur substrat GaN
+MASK_H = 40.0           # épaisseur masque SiO2
+PILLAR_SEED_H = 40.0    # germe de pilier au-dessus du masque, avant croissance à facettes
+W = 20.0                # largeur de la fenêtre SAG / du germe
 CX = DOMAIN_NM / 2.0    # centre = 70 nm
 
 SP_ANGLE_DEG = 32.0      # angle semi-polaire depuis c-axe (degrés)
@@ -51,104 +55,98 @@ COLORS = {
 }
 
 # ---------------------------------------------------------------------------
-# Construction de la géométrie crayon (analytique, Wulff depuis bord supérieur)
+# Construction de la géométrie crayon (simulation réelle, deposit_faceted)
 # ---------------------------------------------------------------------------
 
-def _pillar_top_y() -> float:
-    return PILLAR_H   # y du sommet du corps rectangulaire (y=0 = haut du substrat)
+
+def _seed_geometry() -> Geometry:
+    """Substrat + masque SiO2 SAG (ouverture de largeur W) + court germe de pilier GaN."""
+    g = Geometry(domain_width_nm=DOMAIN_NM)
+    g.layers.append(Layer(material="GaN", polygon=box(0.0, -SUBSTRATE_H, DOMAIN_NM, 0.0)))
+    mask = unary_union([
+        box(0.0, 0.0, CX - W / 2, MASK_H),
+        box(CX + W / 2, 0.0, DOMAIN_NM, MASK_H),
+    ])
+    g.layers.append(Layer(material="SiO2", polygon=mask))
+    g.layers.append(Layer(material="GaN", polygon=box(CX - W / 2, 0.0, CX + W / 2, PILLAR_SEED_H)))
+    return g
 
 
-def _pencil_tip(sp_chamfer_nm: float, flat_top_nm: float) -> Polygon:
-    """Polygone de la pointe du crayon.
+def build_pencil(rate_c: float, rate_m: float, rate_sp: float, step_thicknesses: list[float]) -> Geometry:
+    """Fait croître le crayon depuis le germe via `deposit_faceted`, un appel par épaisseur de
+    `step_thicknesses`. `rate_m` ne fait qu'évaser les flancs (il ne change pas la vitesse à
+    laquelle le sommet se referme) ; ce qui décide si le sommet C rétrécit ou s'élargit à chaque
+    pas est uniquement le rapport rate_c / rate_sp : tant que rate_c > rate_sp*cos(θ), la facette
+    SP avance verticalement moins vite que le plan C, donc le coin où elle rencontre le plan C se
+    rapproche du centre à chaque pas - un `rate_m` généreux donne alors un évasement net suivi
+    d'une pointe franche. Si cette condition s'inverse (rate_sp*cos(θ) > rate_c), le sommet C
+    s'élargit au lieu de rétrécir. La sélectivité SAG (`seed_materials`) confine toute la
+    croissance au GaN déjà exposé, comme le ferait un vrai masque SiO2.
 
-    Les facettes SP naissent aux coins supérieurs du pilier et penchent vers
-    l'intérieur à `SP_ANGLE_DEG` depuis l'axe c.
-
-    sp_chamfer_nm : avancée latérale (inward) des facettes SP.
-                    Si sp_chamfer_nm >= W/2 → pointe aiguë (triangle).
-    flat_top_nm   : hauteur supplémentaire du plan C après les SP (0 = pointe aiguë).
+    Volontairement peu d'incréments, mais chacun plus épais, plutôt que beaucoup de pas fins :
+    `_offset_named_facets` mitre chaque nouveau coin à partir du contour déjà déformé par le pas
+    précédent, et un très grand nombre de pas fins laisse s'accumuler de minuscules artefacts
+    numériques (auto-intersections quasi dégénérées) le long du contour - inoffensifs pour la
+    physique simulée, mais visibles à l'écran. Peu de pas, plus francs, donne un contour propre.
     """
-    theta = math.radians(SP_ANGLE_DEG)
-    Y0 = _pillar_top_y()
-    xL = CX - W / 2
-    xR = CX + W / 2
-    sp_chamfer_nm = min(sp_chamfer_nm, W / 2)
-    dh_sp = sp_chamfer_nm / math.tan(theta)   # hauteur verticale du chanfrein SP
+    g = _seed_geometry()
+    for thickness_nm in step_thicknesses:
+        g.deposit_faceted(
+            "GaN",
+            thickness_nm=thickness_nm,
+            rate_c=rate_c,
+            rate_m=rate_m,
+            rate_sp=rate_sp,
+            semi_polar_angle_deg=SP_ANGLE_DEG,
+            seed_materials=["GaN"],
+        )
 
-    if sp_chamfer_nm >= W / 2 - 1e-6 and flat_top_nm <= 0:
-        # Pointe aiguë : triangle
-        h_apex = (W / 2) / math.tan(theta)
-        return Polygon([(xL, Y0), (xR, Y0), (CX, Y0 + h_apex)])
-    else:
-        xL_top = xL + sp_chamfer_nm
-        xR_top = xR - sp_chamfer_nm
-        y_sp   = Y0 + dh_sp
-        y_top  = y_sp + flat_top_nm
-        return Polygon([
-            (xL,     Y0),
-            (xR,     Y0),
-            (xR_top, y_sp),
-            (xR_top, y_top),
-            (xL_top, y_top),
-            (xL_top, y_sp),
-        ])
-
-
-def build_pencil_layers(sp_chamfer_nm: float, flat_top_nm: float
-                        ) -> list[tuple[str, object]]:
-    """Construit la liste (material, polygon) du crayon + MQW.
-
-    Returns list de (material_name, Shapely polygon).
-    """
-    Y0 = _pillar_top_y()
-
-    # -- Structure de base ---------------------------------------------------
-    substrate = box(0.0, -SUBSTRATE_H, DOMAIN_NM, 0.0)
-    mask_l    = box(0.0,  0.0, CX - W / 2, MASK_H)
-    mask_r    = box(CX + W / 2, 0.0, DOMAIN_NM, MASK_H)
-    pillar    = box(CX - W / 2, 0.0, CX + W / 2, Y0)
-    tip       = _pencil_tip(sp_chamfer_nm, flat_top_nm)
-
-    gan_solid = unary_union([pillar, tip])
-
-    # -- MQW : buffer conformel, clipé au-dessus du masque ------------------
-    # Only wrap MQW on the exposed pillar surface above the SAG mask level
-    clip_above = box(-1000.0, MASK_H, DOMAIN_NM + 1000.0, 1e6)
-    # On wrappe uniquement la surface exposée du crayon (pas dans le masque)
-    layers: list[tuple[str, object]] = [
-        ("GaN",  substrate),
-        ("SiO2", unary_union([mask_l, mask_r])),
-        ("GaN",  gan_solid),
-    ]
-
-    current_solid = unary_union([substrate, mask_l, mask_r, gan_solid])
-    current_gan   = gan_solid
-
+    # MQW : incréments conformes (taux égaux sur les trois familles de facettes) pour envelopper
+    # fidèlement la forme du crayon telle qu'elle a émergé, plate ou pointue.
     for _ in range(N_QW):
-        # InGaN QW
-        qw_shell = current_gan.buffer(QW_T, join_style=1).intersection(clip_above)
-        qw_film  = qw_shell.difference(current_solid)
-        layers.append(("InGaN", qw_film))
-        current_solid = unary_union([current_solid, qw_film])
-        current_gan   = qw_film
+        g.deposit_faceted(
+            "InGaN",
+            thickness_nm=QW_T,
+            rate_c=1.0,
+            rate_m=1.0,
+            rate_sp=1.0,
+            semi_polar_angle_deg=SP_ANGLE_DEG,
+            seed_materials=["GaN", "InGaN"],
+        )
+        g.deposit_faceted(
+            "GaN",
+            thickness_nm=QB_T,
+            rate_c=1.0,
+            rate_m=1.0,
+            rate_sp=1.0,
+            semi_polar_angle_deg=SP_ANGLE_DEG,
+            seed_materials=["GaN", "InGaN"],
+        )
+    return g
 
-        # GaN barrière
-        qb_shell = current_gan.buffer(QB_T, join_style=1).intersection(clip_above)
-        qb_film  = qb_shell.difference(current_solid)
-        layers.append(("GaN", qb_film))
-        current_solid = unary_union([current_solid, qb_film])
-        current_gan   = qb_film
 
-    return layers
+def _merge_consecutive_same_material(layers: list[Layer]) -> list[Layer]:
+    """Collapse runs of consecutive same-material layers into one - each `deposit_faceted` call
+    above appends its own thin increment as a separate layer (so the process history stays
+    accurate), but for a picture of the *final* crystal, a stack of 6-11 GaN slivers should read
+    as one continuous shape, not one stroked outline per increment.
+    """
+    merged: list[Layer] = []
+    for layer in layers:
+        if merged and merged[-1].material == layer.material:
+            merged[-1] = Layer(material=layer.material, polygon=unary_union([merged[-1].polygon, layer.polygon]))
+        else:
+            merged.append(layer)
+    return merged
 
 
-def layers_to_frame(mat_layers: list[tuple[str, object]], label: str) -> Frame:
-    sf_layers = [Layer(material=m, polygon=p) for m, p in mat_layers if not p.is_empty]
+def geometry_to_frame(g: Geometry, label: str) -> Frame:
+    layers = _merge_consecutive_same_material([layer for layer in g.layers if not layer.polygon.is_empty])
     return Frame(
         step_index=0,
         step_kind="pencil",
         step_name=label,
-        layers=sf_layers,
+        layers=layers,
         domain_width_nm=DOMAIN_NM,
     )
 
@@ -244,7 +242,10 @@ def build_combined_svg(scenarios: list[Scenario]) -> str:
     ax_off  = 36.0   # space for y-axis labels
 
     n      = len(scenarios)
-    svg_w  = ax_off + n * panel_w + (n - 1) * _GAP + 4
+    box_s  = 5.0
+    leg_gap = 2.0
+    legend_width = sum(box_s + leg_gap + len(mat) * _TICK_FONT * 0.62 + 8.0 for mat in COLORS)
+    svg_w  = max(ax_off + n * panel_w + (n - 1) * _GAP + 4, ax_off + legend_width + 8.0)
     svg_h  = panel_h + 30     # for title above + legend below
 
     lines = [
@@ -281,7 +282,7 @@ def build_combined_svg(scenarios: list[Scenario]) -> str:
         # -- SP angle annotation on right side of tip --------------------------
         theta = math.radians(SP_ANGLE_DEG)
         tip_xR = CX + W / 2          # right edge of pillar
-        tip_yB = _pillar_top_y()     # bottom of tip
+        tip_yB = PILLAR_SEED_H       # bottom of tip region (top of the straight seed)
         arrow_len = 18.0
         ax0s = g_tx + tip_xR
         ay0s = g_ty - tip_yB
@@ -315,8 +316,6 @@ def build_combined_svg(scenarios: list[Scenario]) -> str:
     # -- legend ---------------------------------------------------------------
     leg_x = ax_off
     leg_y = 16.0 + panel_h + 6.0
-    box_s = 5.0
-    gap   = 2.0
     x_cur = leg_x
     for mat, color in COLORS.items():
         lines.append(
@@ -324,10 +323,10 @@ def build_combined_svg(scenarios: list[Scenario]) -> str:
             f'fill="{color}" stroke="rgba(0,0,0,0.3)" stroke-width="0.4"/>'
         )
         lines.append(
-            f'<text x="{x_cur + box_s + gap:.1f}" y="{leg_y + box_s * 0.85:.1f}" '
+            f'<text x="{x_cur + box_s + leg_gap:.1f}" y="{leg_y + box_s * 0.85:.1f}" '
             f'font-size="{_TICK_FONT}" fill="{_LABEL_CLR}">{mat}</text>'
         )
-        x_cur += box_s + gap + len(mat) * _TICK_FONT * 0.62 + 8.0
+        x_cur += box_s + leg_gap + len(mat) * _TICK_FONT * 0.62 + 8.0
 
     # -- scale bar ------------------------------------------------------------
     bar_x = svg_w - 8 - _SCALE_BAR
@@ -353,18 +352,20 @@ def build_combined_svg(scenarios: list[Scenario]) -> str:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    # Pointe plate : petits chanfreins SP (3 nm) + plan C bien plat (8 nm)
-    # Pointe aiguë : facettes SP qui ferment jusqu'à l'apex (triangle)
-    print("Construction pointe plate  (chanfrein SP=3 nm, plan C=8 nm) …")
-    layers_flat = build_pencil_layers(sp_chamfer_nm=3.0, flat_top_nm=8.0)
+    # Pointe plate  : rate_c dominant (1.0) face à rate_sp modeste (0.7) -> le sommet C reste
+    #                 large, seulement chanfreiné aux coins par la facette SP.
+    # Pointe aiguë  : rate_m/rate_sp dominants (1.0) face à rate_c modeste (0.3) -> les facettes
+    #                 SP referment le sommet en pointe avant que le plan C ne puisse suivre.
+    print("Croissance pointe plate  (rate_c=1.0, rate_m=0.4, rate_sp=0.7) …")
+    g_flat = build_pencil(rate_c=1.0, rate_m=0.4, rate_sp=0.7, step_thicknesses=[8.0, 8.0])
 
-    print("Construction pointe aiguë  (chanfrein SP=10 nm = fermeture totale) …")
-    layers_sharp = build_pencil_layers(sp_chamfer_nm=10.0, flat_top_nm=0.0)
+    print("Croissance pointe aiguë  (rate_c=1.0, rate_m=0.8, rate_sp=0.6) …")
+    g_sharp = build_pencil(rate_c=1.0, rate_m=0.8, rate_sp=0.6, step_thicknesses=[3.0] * 7)
 
-    label_flat  = f"Pointe plate   SP chamfer=3 nm / C=8 nm / {SP_ANGLE_DEG:.0f}°"
-    label_sharp = f"Pointe aiguë   SP {SP_ANGLE_DEG:.0f}° → apex (triangle)"
-    frame_flat  = layers_to_frame(layers_flat,  label_flat)
-    frame_sharp = layers_to_frame(layers_sharp, label_sharp)
+    label_flat  = "Pointe plate — c=1.0 / m=0.4 / sp=0.7"
+    label_sharp = "Pointe aiguë — c=1.0 / m=0.8 / sp=0.6"
+    frame_flat  = geometry_to_frame(g_flat, label_flat)
+    frame_sharp = geometry_to_frame(g_sharp, label_sharp)
 
     for label, frame in [("Plate", frame_flat), ("Aiguë", frame_sharp)]:
         top_y = max(l.polygon.bounds[3] for l in frame.layers if not l.polygon.is_empty)

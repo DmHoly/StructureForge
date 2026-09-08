@@ -1,9 +1,11 @@
 import pytest
+from shapely.geometry import box
 
+from structureforge.core.materials import indium_gan
 from structureforge.core.units import Length
-from structureforge.geometry.engine import Geometry
+from structureforge.geometry.engine import Geometry, Layer
 from structureforge.process.simulate import SimulationError, simulate
-from structureforge.process.steps import ChemicalStep, Deposition, Etch, Flip, Lithography, ResistStrip
+from structureforge.process.steps import ChemicalStep, Deposition, Etch, FacetedGrowth, Flip, Lithography, ResistStrip
 
 
 def _flow():
@@ -90,3 +92,33 @@ def test_flip_step_rejects_a_non_flat_front_surface_within_simulate(materials, r
     ]
     with pytest.raises(SimulationError):
         simulate(geometry, flow, materials, recipes)
+
+
+def test_faceted_growth_step_with_per_facet_materials_splits_into_distinct_layers(materials, recipes):
+    geometry = Geometry(domain_width_nm=100)
+    geometry.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    rich, lean = indium_gan(0.30), indium_gan(0.10)
+    lib = materials.with_materials(rich, lean)
+    step = FacetedGrowth(
+        name="InGaN facet-dependent indium",
+        material="GaN",
+        thickness=Length.nm(3),
+        rate_c=1.0,
+        rate_m=0.3,
+        rate_sp=0.6,
+        material_c=rich.name,
+        material_sp=lean.name,
+    )
+    frames = simulate(geometry, [step], lib, recipes)
+
+    new_layers = frames[-1].layers[1:]
+    assert {layer.material for layer in new_layers} == {rich.name, "GaN", lean.name}
+
+
+def test_faceted_growth_step_rejects_an_unregistered_per_facet_material(materials, recipes):
+    geometry = Geometry(domain_width_nm=100)
+    geometry.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    step = FacetedGrowth(name="Bad alloy", material="GaN", thickness=Length.nm(3), material_c="Unobtainium")
+
+    with pytest.raises(SimulationError):
+        simulate(geometry, [step], materials, recipes)

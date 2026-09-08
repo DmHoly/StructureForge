@@ -13,7 +13,16 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
-from .core.materials import Material, MaterialCategory, MaterialLibrary, default_library
+from .core.materials import (
+    Material,
+    MaterialCategory,
+    MaterialLibrary,
+    aluminum_gan,
+    aluminum_gan_gradient,
+    default_library,
+    indium_gan,
+    indium_gan_gradient,
+)
 from .core.recipes import DepositionMode, DepositionRecipe, EtchMode, EtchRecipe, RecipeLibrary, default_recipes
 from .core.units import Length
 from .geometry.engine import Geometry, Layer
@@ -38,6 +47,10 @@ __all__ = [
     "MaterialCategory",
     "MaterialLibrary",
     "default_library",
+    "indium_gan",
+    "aluminum_gan",
+    "indium_gan_gradient",
+    "aluminum_gan_gradient",
     "DepositionMode",
     "DepositionRecipe",
     "EtchMode",

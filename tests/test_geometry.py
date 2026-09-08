@@ -1,5 +1,8 @@
+import math
+
 import pytest
-from shapely.geometry import Point, box
+from shapely.geometry import Point, Polygon, box
+from shapely.ops import unary_union
 
 from structureforge.geometry.engine import Geometry, Layer
 
@@ -212,3 +215,145 @@ def test_lift_off_removes_metal_deposited_on_top_of_stripped_resist():
     al = next(l for l in g.layers if l.material == "Al")
     assert al.polygon.area == pytest.approx(20 * 10, abs=1.0)  # only the opening's metal survives
     assert not any(l.material == "Photoresist" for l in g.layers)
+
+
+def test_faceted_growth_with_only_c_plane_active_does_not_widen_the_sidewalls():
+    """`deposit_faceted` offsets each facet along its own outward normal independently, so a rate
+    of 0 pins that facet's line outright rather than leaking growth from whichever other rate's
+    shared growth vector used to dominate that direction. rate_c alone should grow straight up by
+    exactly rate_c * thickness and leave the sidewalls untouched.
+    """
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    g.deposit_faceted("GaN", thickness_nm=5.0, rate_c=1.0, rate_m=0.0, rate_sp=0.0)
+
+    solid = g.solid()
+    assert solid.bounds[0] == pytest.approx(40.0)
+    assert solid.bounds[2] == pytest.approx(60.0)
+    assert solid.bounds[3] == pytest.approx(55.0)
+
+
+def test_faceted_growth_with_only_m_plane_active_does_not_raise_the_top():
+    """Mirror of the c-only case: rate_m alone should widen both sidewalls by exactly
+    rate_m * thickness and leave the flat top's height untouched.
+    """
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    g.deposit_faceted("GaN", thickness_nm=5.0, rate_c=0.0, rate_m=1.0, rate_sp=0.0)
+
+    solid = g.solid()
+    assert solid.bounds[0] == pytest.approx(35.0)
+    assert solid.bounds[2] == pytest.approx(65.0)
+    assert solid.bounds[3] == pytest.approx(50.0)
+
+
+def test_faceted_growth_pure_sp_extends_an_already_pointed_tip_without_touching_the_sidewalls():
+    """The actual motivating case: a crystal that has already come to a sharp point (no c-plane or
+    m-plane facet left to pin) should be extendable by growing *only* the SP facets - the reported
+    bug was that this always dragged the c-plane/sidewalls along for the ride too. With rate_c =
+    rate_m = 0 there's nothing left for the SP facets to advance against but each other, so the
+    apex should rise by exactly thickness / cos(angle) each step while the sidewalls stay put.
+    """
+    angle_deg = 30.0
+    theta = math.radians(angle_deg)
+    apex_y = 50 + 10 * math.tan(theta)
+    seed = unary_union([box(40, 0, 60, 50), Polygon([(40, 50), (60, 50), (50, apex_y)])])
+
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=seed))
+    for _ in range(3):
+        g.deposit_faceted(
+            "GaN", thickness_nm=2.0, rate_c=0.0, rate_m=0.0, rate_sp=1.0, semi_polar_angle_deg=angle_deg
+        )
+
+    solid = g.solid()
+    assert solid.geom_type == "Polygon"
+    assert solid.bounds[0] == pytest.approx(40.0)
+    assert solid.bounds[2] == pytest.approx(60.0)
+    assert solid.bounds[3] == pytest.approx(apex_y + 3 * 2.0 / math.cos(theta))
+
+
+def test_faceted_growth_small_c_rate_is_not_overridden_by_a_much_larger_sp_rate():
+    """A small (but nonzero) rate_c must still cap the c-plane's own line at rate_c * thickness,
+    no matter how much faster the flanking SP facets are growing - each facet's line moves at its
+    own named rate, full stop, not at whatever the fastest neighbour reaches. Checked away from the
+    corners (dead centre of the original top edge), since a corner's own height is legitimately
+    free to be pulled up by a much faster neighbouring facet meeting a pinned one there - it's the
+    facet's own line, not the silhouette's overall bounds, that a rate of 0 (or a small rate)
+    guarantees.
+    """
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    g.deposit_faceted("GaN", thickness_nm=5.0, rate_c=0.2, rate_m=0.3, rate_sp=3.0, semi_polar_angle_deg=30.0)
+
+    solid = g.solid()
+    c_plane_y = 50.0 + 0.2 * 5.0
+    assert solid.contains(Point(50.0, c_plane_y - 0.5))
+    assert not solid.contains(Point(50.0, c_plane_y + 0.5))
+
+
+def test_faceted_growth_mitre_bevels_instead_of_blowing_up_at_a_lopsided_rate_ratio():
+    """A mitre join between two very unevenly-advancing facets at a shallow angle can shoot out to
+    many times either facet's own distance (the classic miter-join blowup - see `mitre_or_bevel`).
+    A tiny rate_c next to a much larger rate_sp is exactly that case; the film must stay within a
+    sane multiple of the larger rate's own reach rather than spanning most of the domain.
+    """
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    g.deposit_faceted("GaN", thickness_nm=5.0, rate_c=0.1, rate_m=0.0, rate_sp=5.0, semi_polar_angle_deg=30.0)
+
+    solid = g.solid()
+    max_reach = 5.0 * 5.0  # rate_sp * thickness, generously bounding how far any facet should reach
+    assert solid.bounds[0] > 40.0 - 3 * max_reach
+    assert solid.bounds[2] < 60.0 + 3 * max_reach
+
+
+def _run_faceted(**overrides):
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    kwargs = dict(thickness_nm=3.0, rate_c=1.0, rate_m=0.3, rate_sp=0.6, semi_polar_angle_deg=32.0)
+    kwargs.update(overrides)
+    g.deposit_faceted("GaN", **kwargs)
+    return g
+
+
+def test_faceted_growth_without_per_facet_overrides_still_adds_a_single_layer():
+    """No material_c/material_m/material_sp given (the default) must behave exactly as before -
+    one Layer named `material`, not one per family.
+    """
+    g = _run_faceted()
+    new_layers = g.layers[1:]
+    assert len(new_layers) == 1
+    assert new_layers[0].material == "GaN"
+
+
+def test_faceted_growth_splits_into_one_layer_per_distinct_facet_material():
+    """More indium on the c-plane than on the semi-polar facets (the motivating case) - each
+    facet family's own share of the film becomes its own Layer, and nothing is double-counted
+    or dropped: the three per-family areas must sum to exactly what a single unsplit material
+    would have covered.
+    """
+    reference = _run_faceted()
+    reference_area = reference.layers[-1].polygon.area
+
+    g = _run_faceted(material_c="In0.30Ga0.70N", material_m="GaN", material_sp="In0.10Ga0.90N")
+    new_layers = g.layers[1:]
+    materials = {layer.material for layer in new_layers}
+    assert materials == {"In0.30Ga0.70N", "GaN", "In0.10Ga0.90N"}
+
+    total_area = sum(layer.polygon.area for layer in new_layers)
+    assert total_area == pytest.approx(reference_area)
+
+    # the c-plane's own share sits at the flat top, the widest single facet at these rates
+    c_layer = next(layer for layer in new_layers if layer.material == "In0.30Ga0.70N")
+    assert c_layer.polygon.bounds[1] == pytest.approx(50.0)  # starts exactly at the original top
+
+
+def test_faceted_growth_unset_per_facet_materials_fall_back_to_the_base_material():
+    """Only overriding material_c: the m- and sp-grown areas both fall back to `material` and
+    merge into one Layer (they're the same name), while the c-plane gets its own.
+    """
+    g = _run_faceted(material_c="In0.30Ga0.70N")
+    new_layers = g.layers[1:]
+    materials = {layer.material for layer in new_layers}
+    assert materials == {"In0.30Ga0.70N", "GaN"}

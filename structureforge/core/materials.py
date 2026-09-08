@@ -130,3 +130,145 @@ def default_library() -> MaterialLibrary:
         Material(name="SU-8", category=MaterialCategory.resist, color="#e8a33d", density_g_cm3=1.2, notes="Thick negative photoresist for high-aspect-ratio/MEMS masks."),
     ]
     return MaterialLibrary(materials={m.name: m for m in materials})
+
+
+def _lerp(a: float, b: float, t: float) -> float:
+    return a + (b - a) * t
+
+
+def _lerp_color(color_a: str, color_b: str, t: float) -> str:
+    """Linearly blend two "#rrggbb" colors channel-by-channel at t in [0, 1]."""
+    a, b = color_a.lstrip("#"), color_b.lstrip("#")
+    channels = (
+        round(_lerp(int(a[i : i + 2], 16), int(b[i : i + 2], 16), t)) for i in (0, 2, 4)
+    )
+    return "#" + "".join(f"{c:02x}" for c in channels)
+
+
+def _spectral_color(t: float, stops: list[tuple[float, str]]) -> str:
+    """Piecewise-linear blend across `stops` (sorted, ascending `t` in [0, 1]) - a multi-point
+    generalization of `_lerp_color`'s single blend, used to sweep a composition fraction across
+    a whole visible-spectrum palette instead of just two end colors.
+    """
+    if t <= stops[0][0]:
+        return stops[0][1]
+    if t >= stops[-1][0]:
+        return stops[-1][1]
+    for (t0, c0), (t1, c1) in zip(stops, stops[1:]):
+        if t0 <= t <= t1:
+            local_t = (t - t0) / (t1 - t0)
+            return _lerp_color(c0, c1, local_t)
+    return stops[-1][1]  # pragma: no cover - unreachable, t is within [stops[0][0], stops[-1][0]]
+
+
+# Reference points for the two ternary III-N alloys the library parameterizes - not full
+# `Material` entries of their own (the library only stocks the binaries it actually needs
+# elsewhere, GaN and AlN; InN would exist solely to anchor this interpolation). Density and
+# refractive index follow Vegard's law (linear in composition) - a first-order approximation,
+# fine for a schematic cross-section but not for quantitative optics (real InGaN/AlGaN bow).
+# InN's color is the conventional deep red/orange used in epitaxy schematics for "high indium",
+# chosen to be visually far from GaN's own violet-grey so a composition series reads at a glance.
+_GaN_REF = {"color": "#7b6d8d", "density_g_cm3": 6.15, "refractive_index": 2.4}
+_AlN_REF = {"color": "#b0a3c9", "density_g_cm3": 3.26, "refractive_index": 2.1}
+_InN_REF = {"color": "#c1352e", "density_g_cm3": 6.81, "refractive_index": 2.9}
+
+# Indium content read as a sweep across the visible spectrum, echoing the real physics of InGaN:
+# increasing indium content shrinks the bandgap, red-shifting the emission/absorption edge from
+# GaN's own near-UV (violet) towards red - and, matching how real In_x Ga_1-x N is actually used
+# (violet/blue/green LEDs sit below x~0.3, red emitters need x~0.4-0.5, and higher fractions push
+# the emission into the near-infrared, outside the visible range), the full violet-to-red sweep
+# is compressed into x in [0, 0.5]; beyond that the color fades to black rather than continuing
+# to cycle, rather than spreading the rainbow evenly across the whole [0, 1] fraction range.
+# Stops go in actual spectral (wavelength) order - violet, blue, cyan, green, yellow, orange,
+# red - rather than any particular verbal listing of the colors, so the gradient reads as a
+# physically coherent rainbow instead of a jumbled hue cycle.
+_INDIUM_SPECTRUM: list[tuple[float, str]] = [
+    (0.00, "#4b0082"),  # near-UV / violet - pure GaN
+    (0.05, "#0033cc"),  # blue
+    (0.10, "#00b4d8"),  # cyan
+    (0.16, "#2ecc71"),  # green
+    (0.22, "#f1c40f"),  # yellow
+    (0.28, "#e67e22"),  # orange
+    (0.35, "#e63946"),  # red
+    (0.50, "#2a0a0a"),  # deep red fading towards black
+    (1.00, "#000000"),  # black - beyond the visible range (near-infrared), high indium content
+]
+
+
+def _ternary_nitride(
+    symbol: str,
+    param_name: str,
+    fraction: float,
+    other_ref: dict,
+    *,
+    category: MaterialCategory,
+    notes: str | None,
+    color_fn=None,
+) -> Material:
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError(f"{param_name} must be in [0, 1], got {fraction}")
+    name = f"{symbol}{fraction:.2f}Ga{1 - fraction:.2f}N"
+    color = color_fn(fraction) if color_fn is not None else _lerp_color(_GaN_REF["color"], other_ref["color"], fraction)
+    return Material(
+        name=name,
+        category=category,
+        color=color,
+        density_g_cm3=_lerp(_GaN_REF["density_g_cm3"], other_ref["density_g_cm3"], fraction),
+        refractive_index=_lerp(_GaN_REF["refractive_index"], other_ref["refractive_index"], fraction),
+        notes=notes or f"{name} - linear Vegard's-law estimate between GaN and {symbol}N.",
+    )
+
+
+def indium_gan(
+    indium_fraction: float, *, category: MaterialCategory = MaterialCategory.semiconductor, notes: str | None = None
+) -> Material:
+    """In_x Ga_(1-x) N, `indium_fraction` = x from 0 (pure GaN) to 1 (pure InN).
+
+    Named `In{x:.2f}Ga{1-x:.2f}N`, so two calls with the same fraction (rounded to 2 decimals)
+    produce an identically-named `Material` - safe to register into a `MaterialLibrary` once per
+    call site (e.g. once per MQW period) without colliding or needing to de-duplicate by hand.
+    Color sweeps the visible spectrum from near-UV/violet (x=0, pure GaN) through blue, cyan,
+    green, yellow, orange to red - compressed into x in [0, 0.5], matching real In_x Ga_1-x N
+    emission colors, then fading to black for x above that (near-infrared, outside the visible
+    range) - see `_INDIUM_SPECTRUM`. A stack of increasing In content reads, at a glance, as a
+    physically-ordered rainbow: the color *is* the composition, not just a label for it.
+    """
+    return _ternary_nitride(
+        "In",
+        "indium fraction",
+        indium_fraction,
+        _InN_REF,
+        category=category,
+        notes=notes,
+        color_fn=lambda x: _spectral_color(x, _INDIUM_SPECTRUM),
+    )
+
+
+def aluminum_gan(
+    aluminum_fraction: float, *, category: MaterialCategory = MaterialCategory.semiconductor, notes: str | None = None
+) -> Material:
+    """Al_y Ga_(1-y) N, symmetric to `indium_gan` - blends toward AlN (a pale violet) instead of
+    InN, so higher Al content reads as lighter/cooler rather than red-shifted.
+    """
+    return _ternary_nitride("Al", "aluminum fraction", aluminum_fraction, _AlN_REF, category=category, notes=notes)
+
+
+def _fraction_series(start: float, end: float, steps: int) -> list[float]:
+    if steps < 2:
+        raise ValueError(f"steps must be >= 2 to span a range, got {steps}")
+    return [start + (end - start) * i / (steps - 1) for i in range(steps)]
+
+
+def indium_gan_gradient(indium_fraction_start: float, indium_fraction_end: float, steps: int) -> list[Material]:
+    """`steps` `indium_gan` materials evenly spaced from `indium_fraction_start` to
+    `indium_fraction_end` (both ends included) - e.g. one call per sub-layer of a graded-index
+    or digitally-graded InGaN stack. `steps` must be >= 2.
+    """
+    return [indium_gan(x) for x in _fraction_series(indium_fraction_start, indium_fraction_end, steps)]
+
+
+def aluminum_gan_gradient(aluminum_fraction_start: float, aluminum_fraction_end: float, steps: int) -> list[Material]:
+    """`steps` `aluminum_gan` materials evenly spaced from `aluminum_fraction_start` to
+    `aluminum_fraction_end` (both ends included). `steps` must be >= 2.
+    """
+    return [aluminum_gan(y) for y in _fraction_series(aluminum_fraction_start, aluminum_fraction_end, steps)]
