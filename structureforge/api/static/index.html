@@ -62,28 +62,29 @@
           <label>Recette de depot
             <select id="dep-recipe"></select>
           </label>
-          <label>Epaisseur (nm)
-            <input id="dep-thickness" type="number" value="20" min="0" step="0.1" />
-          </label>
+          <div class="length-field-block">
+            <span class="length-field-label">Epaisseur</span>
+            <div id="dep-thickness"></div>
+          </div>
         </div>
 
         <div id="fields-etch" class="step-fields">
           <label>Recette de gravure
             <select id="etch-recipe"></select>
           </label>
-          <label>Profondeur nominale (nm)
-            <input id="etch-depth" type="number" value="20" min="0" step="0.1" />
-          </label>
+          <div class="length-field-block">
+            <span class="length-field-label">Profondeur nominale</span>
+            <div id="etch-depth"></div>
+          </div>
         </div>
 
         <div id="fields-faceted_growth" class="step-fields">
-          <div class="field-row">
-            <label>Materiau
-              <select id="fac-material"></select>
-            </label>
-            <label>Epaisseur nominale (nm)
-              <input id="fac-thickness" type="number" value="10" min="0.1" step="0.1" />
-            </label>
+          <label>Materiau
+            <select id="fac-material"></select>
+          </label>
+          <div class="length-field-block">
+            <span class="length-field-label">Epaisseur nominale (plan C)</span>
+            <div id="fac-thickness"></div>
           </div>
           <p class="epi-hint">Vitesses relatives par plan cristallin (plan C = reference 1.0). L'epaisseur nominale est celle deposee sur le plan C.</p>
           <div class="field-row">
@@ -111,13 +112,12 @@
         </div>
 
         <div id="fields-epitaxial_growth" class="step-fields">
-          <div class="field-row">
-            <label>Materiau epitaxie
-              <select id="epi-material"></select>
-            </label>
-            <label>Epaisseur (nm)
-              <input id="epi-thickness" type="number" value="20" min="0" step="0.1" />
-            </label>
+          <label>Materiau epitaxie
+            <select id="epi-material"></select>
+          </label>
+          <div class="length-field-block">
+            <span class="length-field-label">Epaisseur</span>
+            <div id="epi-thickness"></div>
           </div>
           <div class="field-row">
             <label>Orientation cristalline
@@ -147,18 +147,20 @@
           <label id="pla-stop-wrap">Materiau d'arret
             <select id="pla-stop-material"></select>
           </label>
-          <label id="pla-level-wrap" style="display:none">Niveau cible (nm, 0 = haut du substrat)
-            <input id="pla-level" type="number" value="0" step="0.1" />
-          </label>
+          <div id="pla-level-wrap" class="length-field-block" style="display:none">
+            <span class="length-field-label">Niveau cible (0 = haut du substrat)</span>
+            <div id="pla-level"></div>
+          </div>
         </div>
 
         <div id="fields-lithography" class="step-fields">
           <label>Materiau de resine
             <select id="litho-material"></select>
           </label>
-          <label>Epaisseur de resine (nm)
-            <input id="litho-thickness" type="number" value="5" min="0" step="0.1" />
-          </label>
+          <div class="length-field-block">
+            <span class="length-field-label">Epaisseur de resine</span>
+            <div id="litho-thickness"></div>
+          </div>
           <label>Ouvertures du masque (x0-x1, separees par des virgules)
             <input id="litho-openings" type="text" placeholder="ex. 80-120, 150-170" />
           </label>

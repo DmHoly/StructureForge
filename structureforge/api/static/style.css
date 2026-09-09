@@ -710,3 +710,67 @@ button.ghost:hover {
   font-style: italic;
   line-height: 1.4;
 }
+
+/* -- recursive "Length" field: literal value or a derivation tree ----- */
+
+.length-field-block {
+  margin-bottom: var(--space-3);
+}
+
+.length-field-label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: var(--space-1);
+}
+
+.length-field {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  background: var(--input-bg);
+}
+
+.length-mode {
+  margin-bottom: var(--space-2);
+}
+
+.length-literal-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.length-literal-row .length-literal-value {
+  flex: 1;
+  min-width: 0;
+}
+
+.length-literal-row[hidden],
+.length-derived-fields[hidden],
+.length-rate-constant[hidden],
+.length-rate-arrhenius[hidden] {
+  display: none;
+}
+
+.length-unit {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.length-derived-fields {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px dashed var(--border-strong);
+}
+
+.length-derived-fields label {
+  margin-bottom: var(--space-2);
+}
+
+.length-preview {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--accent);
+  font-weight: 600;
+}
