@@ -87,6 +87,48 @@ def test_simulate_end_to_end(client):
     assert last_materials == {"Si", "SiO2"}  # resist stripped away
 
 
+def test_resolve_length_literal(client):
+    response = client.post("/api/resolve_length", json={"value": 5, "unit": "nm"})
+    assert response.status_code == 200
+    assert response.json()["nm"] == 5.0
+
+
+def test_resolve_length_derived_growth_at_rate(client):
+    body = {
+        "derivation": {
+            "kind": "growth_at_rate",
+            "rate": {"kind": "constant_rate", "nm_per_s": 0.5},
+            "duration_s": 10,
+        }
+    }
+    response = client.post("/api/resolve_length", json=body)
+    assert response.status_code == 200
+    assert response.json()["nm"] == pytest.approx(5.0)
+
+
+def test_simulate_accepts_a_derived_thickness(client):
+    body = {
+        "substrate": {"material": "Si", "domain_width": {"value": 200, "unit": "nm"}, "thickness": {"value": 50, "unit": "nm"}},
+        "steps": [
+            {
+                "kind": "epitaxial_growth",
+                "name": "GaN buffer",
+                "material": "GaN",
+                "thickness": {
+                    "derivation": {
+                        "kind": "growth_at_rate",
+                        "rate": {"kind": "constant_rate", "nm_per_s": 0.5},
+                        "duration_s": 10,
+                    }
+                },
+            },
+        ],
+    }
+    response = client.post("/api/simulate", json=body)
+    assert response.status_code == 200
+    assert len(response.json()["frames"]) == 2
+
+
 def test_simulate_unknown_material_is_a_422(client):
     body = {
         "substrate": {"material": "Unobtainium", "domain_width": {"value": 100, "unit": "nm"}, "thickness": {"value": 10, "unit": "nm"}},

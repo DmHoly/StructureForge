@@ -32,6 +32,22 @@ La sidebar empile trois panneaux :
 3. **Étapes du process** - la liste ordonnée des étapes déjà ajoutées (avec suppression
    individuelle), et le bouton **Simuler** qui déclenche le calcul de toutes les frames.
 
+### Épaisseur dérivée
+
+Les champs épaisseur/profondeur/niveau cible (dépôt, gravure, croissances, planarisation,
+lithographie) proposent un bascule **Valeur directe / Calculée (vitesse x durée)**. En mode
+calculé, on saisit une durée et une vitesse - constante, ou Arrhenius (préfacteur, énergie
+d'activation, température) pour une vitesse qui dépend de la température de croissance - et un
+aperçu « ≈ X nm » se met à jour en direct (`POST /api/resolve_length`, sans relancer toute la
+simulation). C'est `structureforge.core.derivation` exposé dans le formulaire ; voir
+[Comment une épaisseur est atteinte](../README.md#comment-une-épaisseur-est-atteinte--lengthderivation)
+dans le README pour le modèle complet.
+
+![Epaisseur derivee (vitesse Arrhenius) dans le formulaire d'etape](screenshots/derived-length.png)
+
+Rouvrir une étape déjà ajoutée pour modification restaure le mode et les valeurs exactes du
+process qui avait été saisi, dérivé ou non.
+
 ## Zone de canevas : historique et vues multi-échelle
 
 Après simulation, le curseur d'historique en haut de la zone de canevas permet de parcourir chaque

@@ -59,6 +59,10 @@ class ExportFollowResponse(BaseModel):
     title: str
 
 
+class ResolveLengthResponse(BaseModel):
+    nm: float
+
+
 def create_app(
     materials: MaterialLibrary | None = None,
     base_recipes: RecipeLibrary | None = None,
@@ -142,6 +146,17 @@ def create_app(
             frames=[f.to_dict() for f in frames],
             material_colors=used_materials,
         )
+
+    @app.post("/api/resolve_length")
+    def resolve_length(length: Length) -> ResolveLengthResponse:
+        """Preview what a `Length` resolves to in nanometres, whether it's a literal value or a
+        `derivation` tree (rate x duration, Arrhenius, multi-stage...) - lets the GUI show a live
+        "~= X nm" readout while a process is being edited, without running a full simulation.
+        """
+        try:
+            return ResolveLengthResponse(nm=length.to_nm())
+        except ZeroDivisionError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/api/export_follow")
     def export_follow(request: ExportFollowRequest) -> ExportFollowResponse:

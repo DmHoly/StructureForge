@@ -9,6 +9,7 @@ const state = {
   frameIndex: 0,
   globalBounds: null, // {x0,x1,y0,y1} across every frame, for a stable overview scale
   editingIndex: null, // index of the step currently being edited, or null
+  lengthFields: {}, // id -> {get(), set(length)} handles from createLengthField()
 };
 
 let _simDebounce = null;
@@ -46,6 +47,164 @@ function closeModals() {
 
 function optionsHtml(names) {
   return names.map((n) => `<option value="${n}">${n}</option>`).join("");
+}
+
+// -- recursive "Length" field: a literal value, or a derivation tree explaining how it was
+// reached (structureforge.core.derivation) - see structure > etape > param > process. --------
+
+let _lengthPreviewDebounce = null;
+
+function createLengthField(containerId, { defaultValue = 0, allowNegative = false } = {}) {
+  const container = $(containerId);
+  container.classList.add("length-field");
+  const min = allowNegative ? "" : ' min="0"';
+  container.innerHTML = `
+    <select class="length-mode">
+      <option value="literal">Valeur directe</option>
+      <option value="derived">Calculee (vitesse x duree)</option>
+    </select>
+    <div class="length-literal-row">
+      <input type="number" class="length-literal-value" value="${defaultValue}"${min} step="0.1" />
+      <span class="length-unit">nm</span>
+    </div>
+    <div class="length-derived-fields" hidden>
+      <div class="field-row">
+        <label>Duree (s)
+          <input type="number" class="length-duration" value="10" min="0" step="0.1" />
+        </label>
+        <label>Vitesse
+          <select class="length-rate-mode">
+            <option value="constant_rate">Constante</option>
+            <option value="arrhenius_rate">Arrhenius (dependante de T)</option>
+          </select>
+        </label>
+      </div>
+      <div class="length-rate-constant">
+        <label>Vitesse (nm/s)
+          <input type="number" class="length-rate-nm-per-s" value="1" min="0" step="0.01" />
+        </label>
+      </div>
+      <div class="length-rate-arrhenius" hidden>
+        <div class="field-row">
+          <label>Prefacteur (nm/s)
+            <input type="number" class="length-rate-prefactor" value="1e6" step="any" />
+          </label>
+          <label>Energie d'activation (eV)
+            <input type="number" class="length-rate-ea" value="1.5" min="0" step="0.01" />
+          </label>
+        </div>
+        <label>Temperature (K)
+          <input type="number" class="length-rate-temp" value="1050" min="1" step="1" />
+        </label>
+      </div>
+      <p class="length-preview">&asymp; <span class="length-preview-value">-</span> nm</p>
+    </div>
+  `;
+
+  const modeSelect = container.querySelector(".length-mode");
+  const literalRow = container.querySelector(".length-literal-row");
+  const literalInput = container.querySelector(".length-literal-value");
+  const derivedFields = container.querySelector(".length-derived-fields");
+  const durationInput = container.querySelector(".length-duration");
+  const rateModeSelect = container.querySelector(".length-rate-mode");
+  const constantBlock = container.querySelector(".length-rate-constant");
+  const arrheniusBlock = container.querySelector(".length-rate-arrhenius");
+  const rateValueInput = container.querySelector(".length-rate-nm-per-s");
+  const prefactorInput = container.querySelector(".length-rate-prefactor");
+  const eaInput = container.querySelector(".length-rate-ea");
+  const tempInput = container.querySelector(".length-rate-temp");
+  const previewValue = container.querySelector(".length-preview-value");
+
+  function get() {
+    if (modeSelect.value === "literal") {
+      return { value: parseFloat(literalInput.value) || 0, unit: "nm" };
+    }
+    const rate =
+      rateModeSelect.value === "arrhenius_rate"
+        ? {
+            kind: "arrhenius_rate",
+            prefactor_nm_per_s: parseFloat(prefactorInput.value) || 0,
+            activation_energy_eV: parseFloat(eaInput.value) || 0,
+            temperature_K: parseFloat(tempInput.value) || 1,
+          }
+        : { kind: "constant_rate", nm_per_s: parseFloat(rateValueInput.value) || 0 };
+    return {
+      derivation: {
+        kind: "growth_at_rate",
+        rate,
+        duration_s: parseFloat(durationInput.value) || 0,
+      },
+    };
+  }
+
+  function set(length) {
+    const derivation = length && length.derivation;
+    if (!derivation) {
+      modeSelect.value = "literal";
+      literalInput.value = length ? length.value : defaultValue;
+    } else {
+      modeSelect.value = "derived";
+      // Only growth_at_rate is editable from the form; anything else (e.g. a hand-written
+      // multi_stage_growth) is left as-is in state.steps and simply shown via its resolved value.
+      if (derivation.kind === "growth_at_rate") {
+        durationInput.value = derivation.duration_s;
+        const rate = derivation.rate;
+        rateModeSelect.value = rate.kind;
+        if (rate.kind === "arrhenius_rate") {
+          prefactorInput.value = rate.prefactor_nm_per_s;
+          eaInput.value = rate.activation_energy_eV;
+          tempInput.value = rate.temperature_K;
+        } else {
+          rateValueInput.value = rate.nm_per_s;
+        }
+      }
+    }
+    syncVisibility();
+    updatePreview();
+  }
+
+  function syncVisibility() {
+    const derived = modeSelect.value === "derived";
+    literalRow.hidden = derived;
+    derivedFields.hidden = !derived;
+    arrheniusBlock.hidden = rateModeSelect.value !== "arrhenius_rate";
+    constantBlock.hidden = rateModeSelect.value === "arrhenius_rate";
+  }
+
+  async function updatePreview() {
+    if (modeSelect.value !== "derived") return;
+    const length = get();
+    previewValue.textContent = "...";
+    clearTimeout(_lengthPreviewDebounce);
+    _lengthPreviewDebounce = setTimeout(async () => {
+      try {
+        const response = await fetch("/api/resolve_length", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(length),
+        });
+        const data = await response.json();
+        previewValue.textContent = response.ok ? data.nm.toPrecision(4) : "?";
+      } catch {
+        previewValue.textContent = "?";
+      }
+    }, 300);
+  }
+
+  modeSelect.addEventListener("change", () => {
+    syncVisibility();
+    updatePreview();
+  });
+  rateModeSelect.addEventListener("change", () => {
+    syncVisibility();
+    updatePreview();
+  });
+  for (const input of [durationInput, rateValueInput, prefactorInput, eaInput, tempInput]) {
+    input.addEventListener("input", updatePreview);
+  }
+
+  syncVisibility();
+  return { get, set };
 }
 
 async function loadLibraries() {
@@ -128,28 +287,28 @@ function buildStepFromForm() {
       kind, name,
       material: $("dep-material").value,
       recipe: $("dep-recipe").value,
-      thickness: { value: parseFloat($("dep-thickness").value), unit: "nm" },
+      thickness: state.lengthFields["dep-thickness"].get(),
     };
   }
   if (kind === "etch") {
     return {
       kind, name,
       recipe: $("etch-recipe").value,
-      depth: { value: parseFloat($("etch-depth").value), unit: "nm" },
+      depth: state.lengthFields["etch-depth"].get(),
     };
   }
   if (kind === "planarization") {
     const mode = $("pla-mode").value;
     const step = { kind, name };
     if (mode === "stop_material") step.stop_material = $("pla-stop-material").value;
-    else step.target_level = { value: parseFloat($("pla-level").value), unit: "nm" };
+    else step.target_level = state.lengthFields["pla-level"].get();
     return step;
   }
   if (kind === "lithography") {
     return {
       kind, name,
       resist_material: $("litho-material").value,
-      thickness: { value: parseFloat($("litho-thickness").value), unit: "nm" },
+      thickness: state.lengthFields["litho-thickness"].get(),
       openings: parseOpenings($("litho-openings").value),
     };
   }
@@ -161,7 +320,7 @@ function buildStepFromForm() {
     return {
       kind, name,
       material: $("fac-material").value,
-      thickness: { value: parseFloat($("fac-thickness").value), unit: "nm" },
+      thickness: state.lengthFields["fac-thickness"].get(),
       rate_c: parseFloat($("fac-rate-c").value),
       rate_m: parseFloat($("fac-rate-m").value),
       rate_sp: parseFloat($("fac-rate-sp").value),
@@ -178,7 +337,7 @@ function buildStepFromForm() {
     const step = {
       kind, name,
       material: $("epi-material").value,
-      thickness: { value: parseFloat($("epi-thickness").value), unit: "nm" },
+      thickness: state.lengthFields["epi-thickness"].get(),
       orientation,
       seed_materials: seedMaterials,
     };
@@ -275,33 +434,31 @@ function populateFormFromStep(step) {
   $("step-name").value = step.name || "";
   switchStepKindFields();
 
-  const nm = (l) => l ? l.value : 0;
-
   if (step.kind === "deposition") {
     $("dep-material").value = step.material;
     $("dep-recipe").value = step.recipe;
-    $("dep-thickness").value = nm(step.thickness);
+    state.lengthFields["dep-thickness"].set(step.thickness);
   } else if (step.kind === "etch") {
     $("etch-recipe").value = step.recipe;
-    $("etch-depth").value = nm(step.depth);
+    state.lengthFields["etch-depth"].set(step.depth);
   } else if (step.kind === "planarization") {
     if (step.stop_material) {
       $("pla-mode").value = "stop_material";
       $("pla-stop-material").value = step.stop_material;
     } else {
       $("pla-mode").value = "target_level";
-      $("pla-level").value = nm(step.target_level);
+      state.lengthFields["pla-level"].set(step.target_level);
     }
     switchPlanarizationMode();
   } else if (step.kind === "lithography") {
     $("litho-material").value = step.resist_material;
-    $("litho-thickness").value = nm(step.thickness);
+    state.lengthFields["litho-thickness"].set(step.thickness);
     $("litho-openings").value = (step.openings || []).map(([a, b]) => `${a}-${b}`).join(", ");
   } else if (step.kind === "resist_strip") {
     $("strip-material").value = step.material;
   } else if (step.kind === "faceted_growth") {
     $("fac-material").value = step.material;
-    $("fac-thickness").value = nm(step.thickness);
+    state.lengthFields["fac-thickness"].set(step.thickness);
     $("fac-rate-c").value = step.rate_c ?? 1;
     $("fac-rate-m").value = step.rate_m ?? 0.25;
     $("fac-rate-sp").value = step.rate_sp ?? 0.5;
@@ -310,7 +467,7 @@ function populateFormFromStep(step) {
     updateFacetedTipHint();
   } else if (step.kind === "epitaxial_growth") {
     $("epi-material").value = step.material;
-    $("epi-thickness").value = nm(step.thickness);
+    state.lengthFields["epi-thickness"].set(step.thickness);
     $("epi-orientation").value = step.orientation || "c_plane";
     $("epi-angle").value = step.angle_deg ?? 32;
     $("epi-seed-materials").value = (step.seed_materials || []).join(", ");
@@ -811,7 +968,19 @@ function wireEvents() {
   });
 }
 
+function createLengthFields() {
+  state.lengthFields = {
+    "dep-thickness": createLengthField("dep-thickness", { defaultValue: 20 }),
+    "etch-depth": createLengthField("etch-depth", { defaultValue: 20 }),
+    "fac-thickness": createLengthField("fac-thickness", { defaultValue: 10 }),
+    "epi-thickness": createLengthField("epi-thickness", { defaultValue: 20 }),
+    "pla-level": createLengthField("pla-level", { defaultValue: 0, allowNegative: true }),
+    "litho-thickness": createLengthField("litho-thickness", { defaultValue: 5 }),
+  };
+}
+
 async function init() {
+  createLengthFields();
   wireEvents();
   switchStepKindFields();
   switchEpiOrientation();
