@@ -13,6 +13,12 @@ the whole stack in one anisotropic step, leaving one freestanding pillar that ca
 segment intact inside it. The one-liner mental model: axial heterostructure = deposition order;
 the pillar's outline = one mask + one directional etch, not per-segment masking.
 
+The bottom two segments (nucleation buffer, n-GaN stem) use a derived `Length` instead of a
+literal one - see `structureforge.core.derivation` / `examples/derived_gan_growth.py` - to show
+it's a drop-in in a real multi-step flow: `total_height` below sums `.to_nm()` over every segment
+exactly as before, unaware that two of them were reached via rate x duration rather than typed in
+directly.
+
 Run: python examples/nanowire_axial.py
 """
 
@@ -21,9 +27,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from structureforge import (
+    ArrheniusRate,
+    ConstantRate,
     Deposition,
     Etch,
     Geometry,
+    GrowthAtRate,
     Length,
     Lithography,
     ResistStrip,
@@ -39,9 +48,19 @@ def build_axial_stack() -> list:
     Each stays a full-width blanket layer at this point - the wire doesn't exist yet, only a flat
     epitaxial stack does; `build_mask_and_etch` is what actually carves it into a pillar.
     """
+    aln_buffer_thickness = Length.derived(
+        GrowthAtRate(rate=ConstantRate(nm_per_s=0.2), duration_s=40.0)  # 0.2nm/s * 40s = 8nm
+    )
+    n_gan_stem_thickness = Length.derived(
+        GrowthAtRate(
+            # Hotter growth than the AlN buffer above, held long enough to reach 60nm.
+            rate=ArrheniusRate(prefactor_nm_per_s=2.06e8, activation_energy_eV=1.8, temperature_K=1053.0),
+            duration_s=120.0,
+        )
+    )
     steps = [
-        Deposition(name="Tampon de nucleation AlN", material="AlN", recipe="MOCVD Epitaxial", thickness=Length.nm(8)),
-        Deposition(name="Tige n-GaN", material="GaN", recipe="MOCVD Epitaxial", thickness=Length.nm(60)),
+        Deposition(name="Tampon de nucleation AlN", material="AlN", recipe="MOCVD Epitaxial", thickness=aln_buffer_thickness),
+        Deposition(name="Tige n-GaN", material="GaN", recipe="MOCVD Epitaxial", thickness=n_gan_stem_thickness),
         Deposition(name="Barriere axiale AlGaN", material="AlGaN", recipe="MOCVD Epitaxial", thickness=Length.nm(8)),
     ]
     for i in range(1, 4):

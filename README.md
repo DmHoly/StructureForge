@@ -56,16 +56,18 @@ le cas multi-échelle qui a motivé le projet), `examples/koh_v_groove.py` (grav
 anisotrope du silicium, auto-limitée sur les plans {111} à 54.7° - démontre l'ombrage directionnel
 sur une cavité qui se referme), `examples/vpit_led.py` (stack LED III-N - superréseaux, puits
 quantiques multiples, EBL, p-GaN - avec un V-pit nucléé sur une dislocation traversante, ouvert à
-travers les puits quantiques puis refermé par une couche de capping (VCL)) et
-`examples/nanowire_semipolar_tip.py` (nanofil GaN à croissance sélective, gravé en pilier puis
+travers les puits quantiques puis refermé par une couche de capping (VCL)), `examples/nanowire_semipolar_tip.py` (nanofil GaN à croissance sélective, gravé en pilier puis
 terminé par une pointe à facettes semi-polaires {1-101} - un "V-pit à l'envers", les mêmes plans
 sur un mesa convexe au lieu d'une cavité concave - avant que la croissance ne reprenne à plat sur
-le plan c retréci : puits quantique, capot, contact ITO) et `examples/nanowire_axial.py` (un seul
+le plan c retréci : puits quantique, capot, contact ITO), `examples/nanowire_axial.py` (un seul
 nanofil III-N **axial** : tampon AlN, tige n-GaN, puits quantiques multiples InGaN/GaN, blocage
 d'électrons AlGaN, segment p-GaN puis contact Ni/Au, tous empilés le long de l'axe du fil - obtenu,
 comme les deux exemples précédents, en faisant croître tout l'empilement à plat puis en gravant un
 seul pilier au travers, pas par une vraie croissance sélective localisée dans une ouverture de
-masque, que ce moteur ne modélise pas).
+masque, que ce moteur ne modélise pas ; ses deux premiers segments utilisent une épaisseur
+**dérivée** - voir plus bas) et `examples/derived_gan_growth.py` (la même épaisseur de GaN atteinte
+de trois façons différentes - valeur littérale, vitesse constante x durée, vitesse Arrhenius
+dépendante de la température - avec la dérivation utilisée dans une vraie étape simulée).
 
 ## Interface graphique web
 
@@ -80,6 +82,11 @@ Ouvrir `http://127.0.0.1:8000`. On choisit le substrat, on ajoute des étapes un
 **Simuler**, puis on parcourt l'historique du process avec le curseur - les deux vues SVG (vue
 d'ensemble sur tout le domaine, vue zoomée sur une zone qu'on définit numériquement ou via
 « Cadrer sur la structure ») se mettent à jour ensemble, à chaque étape.
+
+Chaque champ épaisseur/profondeur/niveau cible propose un bascule **Valeur directe / Calculée
+(vitesse x durée)** - voir [Comment une épaisseur est atteinte](#comment-une-épaisseur-est-atteinte--lengthderivation)
+plus bas pour ce que « Calculée » représente et [docs/interface.md](docs/interface.md#épaisseur-dérivée)
+pour une capture d'écran.
 
 Voir [docs/interface.md](docs/interface.md) pour une visite guidée de l'interface avec captures
 d'écran (barre latérale, vues multi-échelle avec grille/axes, gestionnaire de recettes, export
@@ -159,6 +166,7 @@ chaque appel plutôt que de réutiliser la même classe.
 | `EtchRecipe` | Un mode de gravure : `isotropic` (attaque uniforme dans toutes les directions - sous-gravure sous un masque) ou `directional` (RIE/usinage ionique, angle réglable), plus une table de sélectivité (`factor_for(material)`). |
 | `Geometry` / `Layer` | La coupe 2D elle-même : un empilement de polygones (shapely), un par couche, dans l'ordre de création (qui fait aussi office d'ordre en z). |
 | `ProcessStep` | Une brique élémentaire : `Deposition`, `Etch`, `Planarization`, `Lithography` (dépôt de résine motif via des ouvertures), `ResistStrip`, ou `ChemicalStep` (aucun effet géométrique - nettoyage, recuit... juste tracé pour l'historique). |
+| `Length` / `LengthDerivation` | Un paramètre numérique (épaisseur, profondeur, niveau cible) - littéral (`Length.nm(5)`) ou **dérivé** d'un petit arbre de process imbriqués (`Length.derived(...)`) expliquant *comment* la valeur a été atteinte. Voir [Comment une épaisseur est atteinte](#comment-une-épaisseur-est-atteinte--lengthderivation) plus bas. |
 | `simulate()` | Applique une liste de `ProcessStep` à une `Geometry` de départ, renvoie une `Frame` par étape (dont l'état initial) pour l'historique/le défilement. |
 
 ### L'exemple de sélectivité de la spec
@@ -179,6 +187,48 @@ EtchRecipe(
 
 C'est exactement `default_recipes()["Dry Oxide Etch"]`. `selectivity_by_material` prend le pas sur
 `selectivity_by_category`, qui prend le pas sur `default_factor` - voir `EtchRecipe.factor_for`.
+
+## Comment une épaisseur est atteinte : `LengthDerivation`
+
+Une structure est un enchaînement d'étapes ; chaque étape porte des paramètres (une épaisseur, une
+profondeur...) ; mais un paramètre comme "5nm de GaN" ne dit rien de *comment* on y arrive - plus
+longtemps à vitesse modeste, ou plus vite (plus chaud) moins longtemps. `structureforge.core.derivation`
+ajoute ce quatrième niveau : **structure > étape > paramètre > process imbriqué**. Un `Length` reste
+par défaut un littéral (`Length.nm(5)`), mais peut à la place porter un `derivation` - un petit arbre
+récursif expliquant comment la valeur a été atteinte :
+
+- `GrowthAtRate` : épaisseur = vitesse x durée.
+- `ConstantRate` : une vitesse fixe, calibrée (le cas de base - rien ne l'explique plus).
+- `ArrheniusRate` : une vitesse qui dépend de la température (`rate = prefacteur * exp(-Ea / kB·T)`),
+  le modèle standard pour une vitesse de croissance/gravure thermiquement activée.
+- `MultiStageGrowth` : plusieurs `GrowthAtRate` mis bout à bout (ex. une rampe de température
+  approximée par paliers) - l'épaisseur totale est la somme de chaque étape, qui est elle-même un
+  arbre complet, donc ça peut brancher, pas seulement chaîner.
+
+```python
+from structureforge import ArrheniusRate, ConstantRate, GrowthAtRate, Length
+
+# 5nm de GaN, deux facons differentes d'y arriver - .to_nm() resout les deux au meme nombre.
+flat = Length.derived(GrowthAtRate(rate=ConstantRate(nm_per_s=0.5), duration_s=10.0))
+
+thermal = Length.derived(GrowthAtRate(
+    rate=ArrheniusRate(prefactor_nm_per_s=2.06e8, activation_energy_eV=1.8, temperature_K=1053.0),
+    duration_s=10.0,
+))
+
+flat.to_nm(), thermal.to_nm()   # (5.0, ~5.0) - meme resultat, process different
+```
+
+`derivation` est entièrement optionnel et rétrocompatible : `Length(value=..., unit=...)` marche
+comme avant, et un `Length.derived(...)` est un remplacement direct partout où un `Length` littéral
+était attendu (voir `examples/derived_gan_growth.py` en autonome, et `examples/nanowire_axial.py`
+où deux segments d'un flow réel utilisent une épaisseur dérivée sans rien changer ailleurs). Côté
+API, `POST /api/simulate` accepte l'un ou l'autre tel quel (c'est juste le schéma pydantic de
+`Length`), et `POST /api/resolve_length` donne l'équivalent en nm d'un `Length` (littéral ou dérivé)
+sans lancer une simulation complète - c'est ce qu'utilise la GUI pour son aperçu en direct. Côté GUI,
+chaque champ épaisseur/profondeur/niveau cible a un bascule **Valeur directe / Calculée (vitesse x
+durée)** ; en mode calculé, la vitesse est elle-même soit constante soit Arrhenius, avec un aperçu
+« ≈ X nm » qui se met à jour en direct (voir [docs/interface.md](docs/interface.md#épaisseur-dérivée)).
 
 ## Le moteur géométrique (limites v1 documentées)
 
@@ -216,15 +266,17 @@ dédié : tout ce qui n'est plus connecté au substrat après le retrait de la r
 
 ```
 structureforge/
-  core/           unites (Length), materiaux (Material/MaterialLibrary), recettes (DepositionRecipe/EtchRecipe),
+  core/           unites (Length), derivation d'une Length (GrowthAtRate/ArrheniusRate/MultiStageGrowth),
+                  materiaux (Material/MaterialLibrary), recettes (DepositionRecipe/EtchRecipe),
                   RecipeStore (recettes personnalisees persistees en JSON)
   geometry/       le moteur (Geometry/Layer, operations booleennes shapely)
   process/        les briques de process (ProcessStep) et simulate()
   presentation/   export SVG d'une Frame (script/notebook, sans la GUI)
   adapters/       pont optionnel vers follow (export_experiment/to_structure/to_steps, extra [follow])
   api/            backend FastAPI + frontend statique (vanilla JS/SVG, extra [api])
-examples/         flows de process complets et executables (STI planaire, nanofils III-N, export Follow)
-tests/            suite pytest (materiaux, recettes, moteur geometrique, simulate, API)
+examples/         flows de process complets et executables (STI planaire, nanofils III-N, export Follow,
+                  epaisseur derivee)
+tests/            suite pytest (materiaux, recettes, moteur geometrique, simulate, API, derivation)
 ```
 
 ## Développer

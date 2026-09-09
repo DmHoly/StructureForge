@@ -23,6 +23,7 @@ from .core.materials import (
     indium_gan,
     indium_gan_gradient,
 )
+from .core.derivation import ArrheniusRate, ConstantRate, GrowthAtRate, LengthDerivation, MultiStageGrowth, RateDerivation
 from .core.recipes import DepositionMode, DepositionRecipe, EtchMode, EtchRecipe, RecipeLibrary, default_recipes
 from .core.units import Length
 from .geometry.engine import Geometry, Layer
@@ -58,6 +59,12 @@ __all__ = [
     "RecipeLibrary",
     "default_recipes",
     "Length",
+    "LengthDerivation",
+    "RateDerivation",
+    "GrowthAtRate",
+    "MultiStageGrowth",
+    "ConstantRate",
+    "ArrheniusRate",
     "Geometry",
     "Layer",
     "ProcessStep",
