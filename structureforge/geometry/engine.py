@@ -48,6 +48,26 @@ def _drop_tiny(geom: BaseGeometry) -> BaseGeometry:
     return geom if geom.area > _EPS_AREA else Polygon()
 
 
+def _fill_holes(geom: BaseGeometry) -> BaseGeometry:
+    """Drop every interior ring from `geom`.
+
+    `_offset_named_facets` mitres/bevels each vertex of a facet chain independently: when the
+    same emergent facet must nucleate from two separate convex corners flanking a short, already-
+    frozen bevel edge (left over from an earlier lopsided-rate step - see `mitre_or_bevel`), each
+    corner's fan is pivoted from its own vertex with no knowledge of the other, and the two fans
+    can fail to reach each other, leaving a sliver of the tip ungrown - a small, real, spurious
+    interior hole in the resulting film, not a physical void (this engine has no mechanism for
+    genuine coalescence-over-a-trench voids - every part of `solid` is offset independently and
+    then unioned back together). Used only by `deposit_faceted`, the one caller whose offset
+    construction can produce this artifact.
+    """
+    if geom.is_empty:
+        return geom
+    if isinstance(geom, MultiPolygon):
+        return MultiPolygon([Polygon(g.exterior) for g in geom.geoms if not g.is_empty])
+    return Polygon(geom.exterior)
+
+
 def sweep_union(geom: BaseGeometry, vector: tuple[float, float]) -> BaseGeometry:
     """The exact Minkowski sum of `geom` with the segment from (0,0) to `vector` - this is what
     "directional" deposition/etch actually mean: a uniform offset in one direction, rather than
@@ -670,7 +690,7 @@ class Geometry:
                 y_min - t,
                 y_max + max_reach,
             )
-            film = _drop_tiny(_clean(film.difference(solid)))
+            film = _fill_holes(_drop_tiny(_clean(film.difference(solid))))
             if not film.is_empty:
                 self.layers.append(Layer(material=layer_material, polygon=film))
 

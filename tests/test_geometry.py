@@ -308,6 +308,27 @@ def test_faceted_growth_mitre_bevels_instead_of_blowing_up_at_a_lopsided_rate_ra
     assert solid.bounds[2] < 60.0 + 3 * max_reach
 
 
+def test_faceted_growth_after_a_bevel_does_not_leave_a_hole_at_the_apex():
+    """A lopsided rate ratio (see the bevel test above) leaves a short, frozen bevel edge behind
+    once the join gets cut instead of mitred - an edge whose normal matches none of c/m/sp, so it
+    never grows in later steps. When the *next* layer's c-plane and semi-polar facets both keep
+    advancing past that frozen edge's two ends, the corner fan nucleating a fresh c-facet is
+    computed independently at each end (see `_offset_named_facets`) and the two fans can fail to
+    meet in the middle, leaving a real, spurious triangular hole right at the apex - reported as a
+    "void" in the rendered structure. This is the actual failing sequence (three facet layers with
+    the growth-rate ratio flipping between them), reduced to a single seed mesa.
+    """
+    g = Geometry(domain_width_nm=300)
+    g.layers.append(Layer(material="GaN", polygon=box(65, 0, 215, 50)))
+    g.deposit_faceted("GaN", thickness_nm=115.3, rate_c=0.95, rate_m=0.0, rate_sp=0.5, semi_polar_angle_deg=30.0)
+    g.deposit_faceted("GaN", thickness_nm=36.3, rate_c=0.1, rate_m=0.0, rate_sp=0.65, semi_polar_angle_deg=30.0)
+    g.deposit_faceted("GaN", thickness_nm=48.6, rate_c=0.4, rate_m=0.0, rate_sp=0.15, semi_polar_angle_deg=30.0)
+
+    solid = g.solid()
+    assert solid.geom_type == "Polygon"
+    assert len(solid.interiors) == 0
+
+
 def _run_faceted(**overrides):
     g = Geometry(domain_width_nm=100)
     g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
