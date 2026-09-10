@@ -4,7 +4,8 @@ import pytest
 from shapely.geometry import Point, Polygon, box
 from shapely.ops import unary_union
 
-from structureforge.geometry.engine import Geometry, Layer
+from structureforge.core.traced import Traced
+from structureforge.geometry.engine import Geometry, Layer, LayerProvenance
 
 
 def test_conformal_deposit_on_a_flat_substrate_is_exactly_width_times_thickness():
@@ -65,6 +66,18 @@ def test_flip_reverses_layer_order_so_layers_0_is_the_new_bottom():
 
     assert g.layers[0].material == "Au"  # the former top is now the anchor at the bottom
     assert g.layers[-1].material == "Si"  # the original substrate now floats freely at the top
+
+
+def test_flip_preserves_each_layer_s_provenance():
+    """`flip` rebuilds every Layer (mirrored polygon, reversed order) - it must carry
+    `provenance` over rather than silently dropping it."""
+    provenance = LayerProvenance(step_kind="deposition", step_name="Au evap", parameters={})
+    g = Geometry.substrate("Si", domain_width_nm=100, thickness_nm=30)
+    g.layers.append(Layer(material="Au", polygon=box(0, 0, 100, 15), provenance=provenance))
+
+    g.flip()
+
+    assert g.layers[0].provenance is provenance
 
 
 def test_flip_rejects_a_non_flat_front_surface():
@@ -378,3 +391,42 @@ def test_faceted_growth_unset_per_facet_materials_fall_back_to_the_base_material
     new_layers = g.layers[1:]
     materials = {layer.material for layer in new_layers}
     assert materials == {"In0.30Ga0.70N", "GaN"}
+
+
+def test_layer_has_no_provenance_by_default():
+    """A bare Layer built directly (the seed in every test above) never had to know about
+    provenance - it stays optional and defaults to None."""
+    layer = Layer(material="GaN", polygon=box(40, 0, 60, 50))
+    assert layer.provenance is None
+
+
+def test_deposit_faceted_attaches_the_given_provenance_to_every_layer_it_creates():
+    """`provenance` is opaque to `deposit_faceted` - it's stamped onto each Layer this call
+    creates as-is, including every per-family split (material_c/material_m/material_sp).
+    """
+    provenance = LayerProvenance(
+        step_kind="faceted_growth",
+        step_name="Test growth",
+        parameters={"thickness": Traced.literal(3.0), "rate_c": Traced.literal(1.0)},
+    )
+    g = _run_faceted(
+        material_c="In0.30Ga0.70N", material_m="GaN", material_sp="In0.10Ga0.90N", provenance=provenance
+    )
+    new_layers = g.layers[1:]
+    assert len(new_layers) == 3
+    for layer in new_layers:
+        assert layer.provenance is provenance
+
+
+def test_deposit_epitaxial_attaches_the_given_provenance():
+    provenance = LayerProvenance(
+        step_kind="epitaxial_growth",
+        step_name="Test growth",
+        parameters={"thickness": Traced.literal(5.0)},
+    )
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    g.deposit_epitaxial("GaN", thickness_nm=5.0, provenance=provenance)
+
+    new_layer = g.layers[-1]
+    assert new_layer.provenance is provenance

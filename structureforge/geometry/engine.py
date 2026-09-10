@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from pydantic import BaseModel, ConfigDict, Field
 from shapely.affinity import scale, translate
 from shapely.geometry import MultiPolygon, Polygon, box
 from shapely.geometry.base import BaseGeometry
@@ -20,6 +21,7 @@ from shapely.ops import unary_union
 
 from ..core.materials import MaterialLibrary
 from ..core.recipes import DepositionMode, DepositionRecipe, EtchMode, EtchRecipe
+from ..core.traced import Traced
 
 _EPS_AREA = 1e-6  # nm^2 - polygons smaller than this are numerical noise, dropped
 _MARGIN = 1.0  # nm of slack padding used around bounding boxes for directional etch
@@ -260,15 +262,39 @@ def beam_vector(angle_deg: float, length: float) -> tuple[float, float]:
     return (length * math.sin(angle), -length * math.cos(angle))
 
 
+class LayerProvenance(BaseModel):
+    """Which process step produced a `Layer`, and the process parameters that were active -
+    each individually possibly carrying its own `Traced` derivation (see
+    `structureforge.core.traced`).
+
+    Deliberately a single open `parameters` table rather than named fields: a `Layer` can end
+    up needing an unbounded, unpredictable set of these over time (a thickness today, a doping
+    concentration next, a measured surface roughness after that), and `LayerProvenance` must
+    never need to change shape just to make room for a new one - only its caller (whichever
+    `Geometry.deposit_*` builds it) needs to grow the dict it passes in.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    step_kind: str
+    step_name: str
+    parameters: dict[str, Traced] = Field(default_factory=dict)
+
+
 @dataclass
 class Layer:
     """One material region of the stack, kept in construction order (oldest first) - that order
     doubles as z-order, since a layer was, by construction, deposited on top of whatever existed
     when it was added. `Geometry.exposed` relies on this to say what's currently on the surface.
+
+    `provenance` is optional and purely descriptive - the geometry engine itself never reads it
+    back for anything - set by whichever `Geometry.deposit_*` call created this layer, when the
+    caller (typically `structureforge.process.simulate`) passed one in.
     """
 
     material: str
     polygon: BaseGeometry
+    provenance: LayerProvenance | None = None
 
     def rings(self) -> list[dict]:
         """This layer's polygon(s) as plain coordinate lists, for JSON/SVG rendering."""
@@ -484,6 +510,7 @@ class Geometry:
         orientation: str = "c_plane",
         angle_deg: float = 0.0,
         seed_materials: list[str] | None = None,
+        provenance: LayerProvenance | None = None,
     ) -> None:
         """Selective-area epitaxial growth — three orientations, optional SAG selectivity.
 
@@ -499,6 +526,9 @@ class Geometry:
         If `seed_materials` is non-empty the film nucleates *only* where one of those materials
         is the topmost exposed surface (every non-seed layer covering the seed blocks growth
         there — SAG selectivity).  Pass an empty list / None to grow on all exposed surfaces.
+
+        `provenance`, if given, is attached to the resulting `Layer` as-is (see
+        `LayerProvenance`) — purely descriptive, this method never reads it back.
         """
         if thickness_nm <= 0 or not self.layers:
             return
@@ -565,7 +595,7 @@ class Geometry:
         film = _drop_tiny(_clean(film.difference(solid)))
 
         if not film.is_empty:
-            self.layers.append(Layer(material=material, polygon=film))
+            self.layers.append(Layer(material=material, polygon=film, provenance=provenance))
 
     def deposit_faceted(
         self,
@@ -579,6 +609,7 @@ class Geometry:
         material_c: str | None = None,
         material_m: str | None = None,
         material_sp: str | None = None,
+        provenance: LayerProvenance | None = None,
     ) -> None:
         """Faceted growth: add `material` by advancing three crystal-plane families - c-plane
         {0001} (`rate_c`), m-plane {10-10} sidewalls (`rate_m`), and semi-polar facets at
@@ -621,6 +652,10 @@ class Geometry:
         point, not blended - there is no in-between composition at a sub-nm sharp edge).
 
         `seed_materials` enables SAG selectivity (same semantics as `deposit_epitaxial`).
+
+        `provenance`, if given, is attached as-is to every `Layer` this call creates (see
+        `LayerProvenance`) - including each per-family split, when `material_c`/`material_m`/
+        `material_sp` produce more than one. This method never reads it back.
         """
         if thickness_nm <= 0 or not self.layers:
             return
@@ -692,7 +727,7 @@ class Geometry:
             )
             film = _fill_holes(_drop_tiny(_clean(film.difference(solid))))
             if not film.is_empty:
-                self.layers.append(Layer(material=layer_material, polygon=film))
+                self.layers.append(Layer(material=layer_material, polygon=film, provenance=provenance))
 
     def etch(
         self,
@@ -861,7 +896,7 @@ class Geometry:
         flipped = []
         for layer in reversed(self.layers):
             polygon = layer.polygon if layer.polygon.is_empty else _clean(scale(layer.polygon, xfact=1.0, yfact=-1.0, origin=(0.0, mirror_axis)))
-            flipped.append(Layer(material=layer.material, polygon=polygon))
+            flipped.append(Layer(material=layer.material, polygon=polygon, provenance=layer.provenance))
         self.layers = flipped
 
     def remove_floating_debris(self) -> None:
