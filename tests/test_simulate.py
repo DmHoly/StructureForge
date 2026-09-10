@@ -122,3 +122,53 @@ def test_faceted_growth_step_rejects_an_unregistered_per_facet_material(material
 
     with pytest.raises(SimulationError):
         simulate(geometry, [step], materials, recipes)
+
+
+def test_growth_steps_stamp_a_literal_thickness_as_a_traced_literal(materials, recipes):
+    """A plain `Length(value=..., unit=...)` (no derivation) becomes a `Traced.literal` on the
+    resulting Layer's provenance - value set, nothing recorded about "how"."""
+    geometry = Geometry(domain_width_nm=100)
+    geometry.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    step = FacetedGrowth(name="Simple growth", material="GaN", thickness=Length.nm(3), rate_c=1.0, rate_m=0.0, rate_sp=0.0)
+
+    frames = simulate(geometry, [step], materials, recipes)
+    new_layer = frames[-1].layers[-1]
+
+    assert new_layer.provenance.step_kind == "faceted_growth"
+    assert new_layer.provenance.step_name == "Simple growth"
+    thickness = new_layer.provenance.parameters["thickness"]
+    assert thickness.value == pytest.approx(3.0)
+    assert thickness.derivation is None
+    assert new_layer.provenance.parameters["rate_c"].value == 1.0
+
+
+def test_growth_steps_stamp_a_derived_thickness_as_a_traced_computed_value(materials, recipes):
+    """A `Length.derived(...)` thickness carries its `LengthDerivation` tree straight through to
+    the resulting Layer's provenance, alongside the resolved nanometre value."""
+    from structureforge.core.derivation import ConstantRate, GrowthAtRate
+
+    geometry = Geometry(domain_width_nm=100)
+    geometry.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
+    thickness = Length.derived(GrowthAtRate(rate=ConstantRate(nm_per_s=0.5), duration_s=6.0))
+    step = FacetedGrowth(name="Timed growth", material="GaN", thickness=thickness, rate_c=1.0, rate_m=0.0, rate_sp=0.0)
+
+    frames = simulate(geometry, [step], materials, recipes)
+    traced_thickness = frames[-1].layers[-1].provenance.parameters["thickness"]
+
+    assert traced_thickness.value == pytest.approx(3.0)  # 0.5 nm/s * 6s
+    assert traced_thickness.derivation["kind"] == "growth_at_rate"
+    assert traced_thickness.derivation["rate"] == {"kind": "constant_rate", "nm_per_s": 0.5}
+
+
+def test_frame_to_dict_serializes_provenance_and_omits_it_when_absent(materials, recipes):
+    geometry = Geometry.substrate("Si", domain_width_nm=100, thickness_nm=30)
+    flow = [Deposition(name="Oxyde", material="SiO2", recipe="CVD Conformal", thickness=Length.nm(20))]
+    frames = simulate(geometry, flow, materials, recipes)
+
+    initial_layer_dict = frames[0].to_dict()["layers"][0]
+    assert initial_layer_dict["provenance"] is None
+
+    # Deposition steps don't build a LayerProvenance (out of scope for this pass) - still None,
+    # not a crash - Layer.provenance stays optional everywhere it isn't explicitly wired up.
+    deposited_layer_dict = frames[-1].to_dict()["layers"][-1]
+    assert deposited_layer_dict["provenance"] is None

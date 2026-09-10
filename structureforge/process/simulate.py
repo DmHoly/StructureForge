@@ -9,7 +9,9 @@ from dataclasses import dataclass
 
 from ..core.materials import MaterialLibrary
 from ..core.recipes import RecipeLibrary
-from ..geometry.engine import Geometry, Layer
+from ..core.traced import Traced
+from ..core.units import Length
+from ..geometry.engine import Geometry, Layer, LayerProvenance
 from .steps import ChemicalStep, Deposition, EpitaxialGrowth, FacetedGrowth, Etch, Flip, Lithography, Planarization, ProcessStep, ResistStrip
 
 
@@ -37,7 +39,14 @@ class Frame:
             "step_kind": self.step_kind,
             "step_name": self.step_name,
             "domain_width_nm": self.domain_width_nm,
-            "layers": [{"material": l.material, "rings": l.rings()} for l in self.layers],
+            "layers": [
+                {
+                    "material": l.material,
+                    "rings": l.rings(),
+                    "provenance": l.provenance.model_dump(mode="json") if l.provenance else None,
+                }
+                for l in self.layers
+            ],
         }
 
 
@@ -50,7 +59,7 @@ def _snapshot(geometry: Geometry) -> list[Layer]:
     engine uses them, only the wrapper's attribute gets reassigned) is enough to decouple a
     snapshot from whatever `geometry` does afterwards.
     """
-    return [Layer(material=l.material, polygon=l.polygon) for l in geometry.frame_layers()]
+    return [Layer(material=l.material, polygon=l.polygon, provenance=l.provenance) for l in geometry.frame_layers()]
 
 
 def simulate(
@@ -76,6 +85,16 @@ def simulate(
     return frames
 
 
+def _traced_length(length: Length) -> Traced:
+    """Bridge `Length`'s own value/derivation duality into a generic `Traced`: a literal
+    `Length` becomes a bare `Traced.literal`, and a derived one (rate x duration, Arrhenius...)
+    becomes `Traced.computed`, carrying the same `LengthDerivation` tree that produced it.
+    """
+    if length.derivation is not None:
+        return Traced.computed(value=length.to_nm(), derivation=length.derivation.model_dump(mode="json"))
+    return Traced.literal(length.to_nm())
+
+
 def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, recipes: RecipeLibrary) -> None:
     if isinstance(step, Deposition):
         materials.get(step.material)  # fail fast with a clear message if the material is unknown
@@ -97,18 +116,41 @@ def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, re
         geometry.remove_floating_debris()
     elif isinstance(step, EpitaxialGrowth):
         materials.get(step.material)  # fail fast if material unknown
+        provenance = LayerProvenance(
+            step_kind=step.kind,
+            step_name=step.name,
+            parameters={
+                "thickness": _traced_length(step.thickness),
+                "orientation": Traced.literal(step.orientation.value),
+                "angle_deg": Traced.literal(step.angle_deg),
+                "seed_materials": Traced.literal(list(step.seed_materials)),
+            },
+        )
         geometry.deposit_epitaxial(
             step.material,
             step.thickness.to_nm(),
             orientation=step.orientation.value,
             angle_deg=step.angle_deg,
             seed_materials=list(step.seed_materials) if step.seed_materials else None,
+            provenance=provenance,
         )
     elif isinstance(step, FacetedGrowth):
         materials.get(step.material)
         for override in (step.material_c, step.material_m, step.material_sp):
             if override is not None:
                 materials.get(override)
+        provenance = LayerProvenance(
+            step_kind=step.kind,
+            step_name=step.name,
+            parameters={
+                "thickness": _traced_length(step.thickness),
+                "rate_c": Traced.literal(step.rate_c),
+                "rate_m": Traced.literal(step.rate_m),
+                "rate_sp": Traced.literal(step.rate_sp),
+                "semi_polar_angle_deg": Traced.literal(step.semi_polar_angle_deg),
+                "seed_materials": Traced.literal(list(step.seed_materials)),
+            },
+        )
         geometry.deposit_faceted(
             step.material,
             step.thickness.to_nm(),
@@ -120,6 +162,7 @@ def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, re
             material_c=step.material_c,
             material_m=step.material_m,
             material_sp=step.material_sp,
+            provenance=provenance,
         )
     elif isinstance(step, Flip):
         geometry.flip()
