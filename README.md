@@ -49,25 +49,37 @@ frames = simulate(geometry, steps, materials, recipes)   # une Frame par etape +
 save_svg("trench.svg", frames[-1], {m.name: m.color for m in materials})
 ```
 
-Voir `examples/trench_isolation.py` (flow STI planaire complet : pad oxide, nitrure d'arrêt,
-masque, gravure, remplissage, CMP), `examples/nanowire_pzgan.py` (empilement GaN/AlGaN/InGaN/GaN
-gravé en réseau de nanofils par lithographie EBL (masque PMMA) + gravure Cl2 ICP-RIE sélective -
-le cas multi-échelle qui a motivé le projet), `examples/koh_v_groove.py` (gravure humide KOH
-anisotrope du silicium, auto-limitée sur les plans {111} à 54.7° - démontre l'ombrage directionnel
-sur une cavité qui se referme), `examples/vpit_led.py` (stack LED III-N - superréseaux, puits
-quantiques multiples, EBL, p-GaN - avec un V-pit nucléé sur une dislocation traversante, ouvert à
-travers les puits quantiques puis refermé par une couche de capping (VCL)), `examples/nanowire_semipolar_tip.py` (nanofil GaN à croissance sélective, gravé en pilier puis
-terminé par une pointe à facettes semi-polaires {1-101} - un "V-pit à l'envers", les mêmes plans
-sur un mesa convexe au lieu d'une cavité concave - avant que la croissance ne reprenne à plat sur
-le plan c retréci : puits quantique, capot, contact ITO), `examples/nanowire_axial.py` (un seul
-nanofil III-N **axial** : tampon AlN, tige n-GaN, puits quantiques multiples InGaN/GaN, blocage
-d'électrons AlGaN, segment p-GaN puis contact Ni/Au, tous empilés le long de l'axe du fil - obtenu,
-comme les deux exemples précédents, en faisant croître tout l'empilement à plat puis en gravant un
-seul pilier au travers, pas par une vraie croissance sélective localisée dans une ouverture de
-masque, que ce moteur ne modélise pas ; ses deux premiers segments utilisent une épaisseur
-**dérivée** - voir plus bas) et `examples/derived_gan_growth.py` (la même épaisseur de GaN atteinte
-de trois façons différentes - valeur littérale, vitesse constante x durée, vitesse Arrhenius
-dépendante de la température - avec la dérivation utilisée dans une vraie étape simulée).
+Les 13 scripts de `examples/` sont exécutables directement (`python examples/<script>.py`) et
+écrivent leur(s) SVG dans `examples/output/` (ou à côté du script pour les plus anciens). Trois
+groupes :
+
+**Flows `simulate()` complets** (liste de `ProcessStep`, comme l'exemple ci-dessus) :
+
+| Script | Démontre |
+|---|---|
+| `trench_isolation.py` | Flow STI planaire complet : pad oxide, nitrure d'arrêt, masque, gravure, remplissage, CMP - tous les types d'étape sauf un dépôt directionnel. |
+| `nanowire_pzgan.py` | Empilement GaN/AlGaN/InGaN/GaN gravé en réseau de nanofils par lithographie EBL (masque PMMA) + gravure Cl2 ICP-RIE sélective - le cas multi-échelle qui a motivé le projet. |
+| `koh_v_groove.py` | Gravure humide KOH anisotrope du silicium, auto-limitée sur les plans {111} à 54.7° - démontre l'ombrage directionnel sur une cavité qui se referme. |
+| `vpit_led.py` | Stack LED III-N - superréseaux, puits quantiques multiples, EBL, p-GaN - avec un V-pit nucléé sur une dislocation traversante, ouvert à travers les puits quantiques puis refermé par une couche de capping (VCL). |
+| `nanowire_semipolar_tip.py` | Nanofil GaN à croissance sélective, gravé en pilier puis terminé par une pointe à facettes semi-polaires {1-101} - un "V-pit à l'envers", les mêmes plans sur un mesa convexe au lieu d'une cavité concave - avant que la croissance ne reprenne à plat sur le plan c rétréci : puits quantique, capot, contact ITO. |
+| `nanowire_axial.py` | Un seul nanofil III-N **axial** : tampon AlN, tige n-GaN, puits quantiques multiples InGaN/GaN, blocage d'électrons AlGaN, segment p-GaN puis contact Ni/Au, tous empilés le long de l'axe du fil - obtenu, comme les deux exemples précédents, en faisant croître tout l'empilement à plat puis en gravant un seul pilier au travers, pas par une vraie croissance sélective localisée dans une ouverture de masque, que ce moteur ne modélise pas ; ses deux premiers segments utilisent une épaisseur **dérivée** (voir [Comment une épaisseur est atteinte](#comment-une-épaisseur-est-atteinte--lengthderivation)). |
+| `epitaxial_growth_sag.py` | Croissance sélective (SAG) III-N sur les trois orientations en une seule fois : plan C dans des ouvertures de masque SiO2 (homo- et hétéro-épitaxie), coque plan M sur les flancs d'un pilier GaN démasqué, et film semi-polaire à 32° sur un template GaN nu - via `EpitaxialGrowth.seed_materials`/`orientation`/`angle_deg`. |
+| `derived_gan_growth.py` | La même épaisseur de GaN atteinte de trois façons différentes - valeur littérale, vitesse constante x durée, vitesse Arrhenius dépendante de la température - avec la dérivation utilisée dans une vraie étape simulée. |
+| `export_to_follow.py` | Simule le flow STI puis committe la structure finale et l'historique de process comme une expérience Follow (nécessite l'extra `[follow]`). |
+
+**Démos `Geometry.deposit_faceted()` en incréments directs** (pas de `simulate()`/`ProcessStep` -
+la forme du germe est construite à la main puis la croissance multi-facette est appliquée pas à
+pas, comme le ferait un vrai step `FacetedGrowth` répété) :
+
+| Script | Démontre |
+|---|---|
+| `nanowire_pencil.py` | Deux géométries de pointe (plate / aiguë) obtenues du seul jeu de `rate_c`/`rate_m`/`rate_sp`, avec des puits quantiques (MQW) qui suivent fidèlement la forme du crayon telle qu'elle a émergé. |
+| `nanowire_meplat.py` | Un méplat plan-C qui naît sur une pointe semi-polaire puis se referme à nouveau - le sens rétrécissement/élargissement d'une facette C flanquée de facettes SP ne dépend que de `rate_c`, `rate_sp` et l'angle, jamais de `rate_m`. |
+| `nanowire_facet_dependent_indium.py` | Incorporation d'indium dépendante de la facette dans un même puits quantique InGaN, via `material_c`/`material_m`/`material_sp` : plus riche en indium sur le plan C, plus pauvre sur M/semi-polaire. |
+| `nanowire_ingan_gradient.py` | Un puits quantique InGaN gradué en indium période par période (`core.materials.indium_gan_gradient`) - la couleur code directement la composition au lieu d'être une étiquette arbitraire. |
+
+Les scripts en français commentent le *pourquoi* des choix de `rate_c`/`rate_m`/`rate_sp` en
+détail dans leur docstring ; ceux en anglais visent plutôt la couverture des types de steps.
 
 ## Interface graphique web
 
@@ -165,8 +177,9 @@ chaque appel plutôt que de réutiliser la même classe.
 | `DepositionRecipe` | Un mode de dépôt : `conformal` (CVD/ALD - épaisseur uniforme dans toutes les directions) ou `directional` (PVD/évaporation - dépôt en ligne de vue depuis un angle, `angle_deg` mesuré depuis la normale). |
 | `EtchRecipe` | Un mode de gravure : `isotropic` (attaque uniforme dans toutes les directions - sous-gravure sous un masque) ou `directional` (RIE/usinage ionique, angle réglable), plus une table de sélectivité (`factor_for(material)`). |
 | `Geometry` / `Layer` | La coupe 2D elle-même : un empilement de polygones (shapely), un par couche, dans l'ordre de création (qui fait aussi office d'ordre en z). |
-| `ProcessStep` | Une brique élémentaire : `Deposition`, `Etch`, `Planarization`, `Lithography` (dépôt de résine motif via des ouvertures), `ResistStrip`, ou `ChemicalStep` (aucun effet géométrique - nettoyage, recuit... juste tracé pour l'historique). |
+| `ProcessStep` | Une brique élémentaire : `Deposition`, `Etch`, `Planarization`, `Lithography` (dépôt de résine motif via des ouvertures), `ResistStrip`, `ChemicalStep` (aucun effet géométrique - nettoyage, recuit... juste tracé pour l'historique), `EpitaxialGrowth` (croissance sélective plan C/M/semi-polaire, voir `GrowthOrientation`), `FacetedGrowth` (croissance multi-facette pilotée par trois vitesses relatives `rate_c`/`rate_m`/`rate_sp`, utilisée par les exemples nanofil) ou `Flip` (retourne la plaquette pour traiter la face arrière). |
 | `Length` / `LengthDerivation` | Un paramètre numérique (épaisseur, profondeur, niveau cible) - littéral (`Length.nm(5)`) ou **dérivé** d'un petit arbre de process imbriqués (`Length.derived(...)`) expliquant *comment* la valeur a été atteinte. Voir [Comment une épaisseur est atteinte](#comment-une-épaisseur-est-atteinte--lengthderivation) plus bas. |
+| `Traced` / `LayerProvenance` | La même idée que `Length.derived(...)`, généralisée à **n'importe quel** paramètre de step (pas seulement une épaisseur) et attachée directement au `Layer` produit - une table ouverte `nom -> Traced` posée automatiquement par `simulate()` pour `EpitaxialGrowth`/`FacetedGrowth`. Voir [docs/layer-provenance.md](docs/layer-provenance.md). |
 | `simulate()` | Applique une liste de `ProcessStep` à une `Geometry` de départ, renvoie une `Frame` par étape (dont l'état initial) pour l'historique/le défilement. |
 
 ### L'exemple de sélectivité de la spec
@@ -267,16 +280,18 @@ dédié : tout ce qui n'est plus connecté au substrat après le retrait de la r
 ```
 structureforge/
   core/           unites (Length), derivation d'une Length (GrowthAtRate/ArrheniusRate/MultiStageGrowth),
+                  Traced/LayerProvenance (provenance generalisee a tout parametre, voir docs/layer-provenance.md),
                   materiaux (Material/MaterialLibrary), recettes (DepositionRecipe/EtchRecipe),
                   RecipeStore (recettes personnalisees persistees en JSON)
   geometry/       le moteur (Geometry/Layer, operations booleennes shapely)
-  process/        les briques de process (ProcessStep) et simulate()
+  process/        les briques de process (ProcessStep, dont EpitaxialGrowth/FacetedGrowth/Flip) et simulate()
   presentation/   export SVG d'une Frame (script/notebook, sans la GUI)
   adapters/       pont optionnel vers follow (export_experiment/to_structure/to_steps, extra [follow])
   api/            backend FastAPI + frontend statique (vanilla JS/SVG, extra [api])
-examples/         flows de process complets et executables (STI planaire, nanofils III-N, export Follow,
-                  epaisseur derivee)
-tests/            suite pytest (materiaux, recettes, moteur geometrique, simulate, API, derivation)
+examples/         13 scripts de process executables (STI planaire, nanofils III-N axiaux/radiaux,
+                  V-pit LED, croissance selective SAG, export Follow, epaisseur derivee)
+tests/            suite pytest (materiaux, recettes, moteur geometrique, simulate, API, derivation, provenance)
+docs/             interface.md (visite guidee de la GUI), layer-provenance.md (Traced/LayerProvenance)
 ```
 
 ## Développer
