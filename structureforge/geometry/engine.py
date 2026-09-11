@@ -253,6 +253,8 @@ def _offset_named_facets(
 
         near_pt: list[tuple[float, float]] = [(0.0, 0.0)] * n
         far_pt: list[tuple[float, float]] = [(0.0, 0.0)] * n
+        chains: list[list[tuple[float, float, float, str]]] = [[] for _ in range(n)]
+        mitre_points_list: list[list[tuple[tuple[float, float], str]]] = [[] for _ in range(n)]
         for i in range(n):
             v = coords[i]
             n_in, d_in, lbl_in = normals[i - 1], dists[i - 1], labels[i - 1]
@@ -277,8 +279,60 @@ def _offset_named_facets(
                 for (nx1, ny1, d1, l1), (nx2, ny2, d2, l2) in zip(chain, chain[1:])
                 for tagged in mitre_or_bevel(v, (nx1, ny1), d1, l1, (nx2, ny2), d2, l2)
             ]
+            chains[i] = chain
+            mitre_points_list[i] = mitre_points
             near_pt[i] = mitre_points[0][0]
             far_pt[i] = mitre_points[-1][0]
+
+        # Two fans pivoted from opposite ends of the same shared edge, entirely independently (see
+        # this function's docstring), can each overshoot past the *other* corner instead of meeting
+        # partway along that edge - most visibly a still-growing c-plane top narrow enough that both
+        # flanking semi-polar facets' mitre points land beyond one another, which would otherwise
+        # hand the strip-emission loop below a self-folded (bowtie) quad and produce a double-tipped
+        # apex once `buffer(0)` splits it. Detect that crossing along the shared edge's own direction
+        # and, where it happens, collapse the edge: replace both corners' points with the direct
+        # intersection of their next-to-outermost lines (skipping the collapsed edge's own line
+        # entirely), so the two flanking fans meet at one point instead of folding past each other -
+        # the strip-emission loop below then draws that edge as the triangle from its two original
+        # endpoints up to this shared point, rather than the (now degenerate) quad it uses elsewhere.
+        collapsed = [False] * n
+        for i in range(n):
+            if dists[i] <= 0:
+                continue
+            j = (i + 1) % n
+            v_i, v_j = coords[i], coords[j]
+            edge_len = math.hypot(v_j[0] - v_i[0], v_j[1] - v_i[1])
+            if edge_len < 1e-9:
+                continue
+            e_dir = ((v_j[0] - v_i[0]) / edge_len, (v_j[1] - v_i[1]) / edge_len)
+            far_p = mitre_points_list[i][-1][0]
+            near_p = mitre_points_list[j][0][0]
+            t_far = (far_p[0] - v_i[0]) * e_dir[0] + (far_p[1] - v_i[1]) * e_dir[1]
+            t_near = (near_p[0] - v_i[0]) * e_dir[0] + (near_p[1] - v_i[1]) * e_dir[1]
+            if t_far <= t_near + 1e-9:
+                continue
+            nx1, ny1, d1, _lbl1 = chains[i][-2]
+            nx2, ny2, d2, _lbl2 = chains[j][1]
+            p1 = (v_i[0] + nx1 * d1, v_i[1] + ny1 * d1)
+            dir1 = (-ny1, nx1)
+            p2 = (v_j[0] + nx2 * d2, v_j[1] + ny2 * d2)
+            dir2 = (-ny2, nx2)
+            det = dir1[0] * dir2[1] - dir1[1] * dir2[0]
+            if abs(det) < 1e-9:
+                continue
+            t = ((p2[0] - p1[0]) * dir2[1] - (p2[1] - p1[1]) * dir2[0]) / det
+            x_point = (p1[0] + dir1[0] * t, p1[1] + dir1[1] * t)
+            far_label = mitre_points_list[i][-1][1]
+            near_label = mitre_points_list[j][0][1]
+            mitre_points_list[i][-1] = (x_point, far_label)
+            mitre_points_list[j][0] = (x_point, near_label)
+            far_pt[i] = x_point
+            near_pt[j] = x_point
+            collapsed[i] = True
+
+        for i in range(n):
+            v = coords[i]
+            mitre_points = mitre_points_list[i]
             for (p_a, label_a), (p_b, _label_b) in zip(mitre_points, mitre_points[1:]):
                 add_piece(label_a, Polygon([v, p_a, p_b]).buffer(0))
 
@@ -286,7 +340,10 @@ def _offset_named_facets(
             if dists[i] <= 0:
                 continue
             v_i, v_next = coords[i], coords[(i + 1) % n]
-            add_piece(labels[i], Polygon([v_i, v_next, near_pt[(i + 1) % n], far_pt[i]]).buffer(0))
+            if collapsed[i]:
+                add_piece(labels[i], Polygon([v_i, v_next, far_pt[i]]).buffer(0))
+            else:
+                add_piece(labels[i], Polygon([v_i, v_next, near_pt[(i + 1) % n], far_pt[i]]).buffer(0))
 
     return {label: _clean(unary_union(pcs)) for label, pcs in pieces_by_family.items()}
 
@@ -764,7 +821,8 @@ class Geometry:
                 y_min - t,
                 y_max + max_reach,
             )
-            film = _fill_holes(_drop_tiny(_clean(film.difference(solid))))
+            film = _merge_touching(_clean(film.difference(solid)))
+            film = _fill_holes(_drop_tiny(film))
             if not film.is_empty:
                 self.layers.append(Layer(material=layer_material, polygon=film, provenance=provenance))
 
