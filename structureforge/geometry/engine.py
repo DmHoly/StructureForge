@@ -292,8 +292,9 @@ def _offset_named_facets(
         # apex once `buffer(0)` splits it. Detect that crossing along the shared edge's own direction
         # and, where it happens, collapse the edge: replace both corners' points with the direct
         # intersection of their next-to-outermost lines (skipping the collapsed edge's own line
-        # entirely) and drop that edge's strip below, so the two flanking fans meet at one point
-        # instead of folding past each other.
+        # entirely), so the two flanking fans meet at one point instead of folding past each other -
+        # the strip-emission loop below then draws that edge as the triangle from its two original
+        # endpoints up to this shared point, rather than the (now degenerate) quad it uses elsewhere.
         collapsed = [False] * n
         for i in range(n):
             if dists[i] <= 0:
@@ -336,10 +337,13 @@ def _offset_named_facets(
                 add_piece(label_a, Polygon([v, p_a, p_b]).buffer(0))
 
         for i in range(n):
-            if dists[i] <= 0 or collapsed[i]:
+            if dists[i] <= 0:
                 continue
             v_i, v_next = coords[i], coords[(i + 1) % n]
-            add_piece(labels[i], Polygon([v_i, v_next, near_pt[(i + 1) % n], far_pt[i]]).buffer(0))
+            if collapsed[i]:
+                add_piece(labels[i], Polygon([v_i, v_next, far_pt[i]]).buffer(0))
+            else:
+                add_piece(labels[i], Polygon([v_i, v_next, near_pt[(i + 1) % n], far_pt[i]]).buffer(0))
 
     return {label: _clean(unary_union(pcs)) for label, pcs in pieces_by_family.items()}
 
