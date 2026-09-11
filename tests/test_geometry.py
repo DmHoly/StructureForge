@@ -342,6 +342,24 @@ def test_faceted_growth_after_a_bevel_does_not_leave_a_hole_at_the_apex():
     assert len(solid.interiors) == 0
 
 
+def test_faceted_growth_does_not_split_a_closing_tip_into_two_touching_polygons():
+    """A related failure mode to the bevel/hole case above: `_offset_named_facets` pivots each
+    corner's fan from its own vertex independently, so the two fans nucleating from opposite sides
+    of a mesa's narrowing top can meet at exactly one shared point instead of overlapping over a
+    real area. `unary_union`/`.buffer(0)` leave point-only contacts as separate `MultiPolygon`
+    members rather than merging them - a closing tip rendered as two separate "pointed" pieces
+    pinched together at that one point instead of one continuous shape (reported as two polygons
+    forming their own points where a single apex was expected).
+    """
+    g = Geometry(domain_width_nm=300)
+    g.layers.append(Layer(material="GaN", polygon=box(130, 0, 170, 20)))
+    for _ in range(6):
+        g.deposit_faceted("GaN", thickness_nm=2.0, rate_c=0.2, rate_m=0.0, rate_sp=1.0, semi_polar_angle_deg=66.0)
+
+    solid = g.solid()
+    assert solid.geom_type == "Polygon"
+
+
 def _run_faceted(**overrides):
     g = Geometry(domain_width_nm=100)
     g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))

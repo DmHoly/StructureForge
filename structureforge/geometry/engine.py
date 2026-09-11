@@ -28,6 +28,8 @@ _MARGIN = 1.0  # nm of slack padding used around bounding boxes for directional 
 _GUARD_MARGIN = 1.0e4  # nm - "effectively infinite" padding for other-factor layers during etch, see Geometry.etch
 _BULK_MARGIN = 1.0e4  # nm - "effectively infinite" downward extension standing in for the wafer's bulk, see floor_nm
 _SIMPLIFY_TOL = 0.02  # nm - keeps vertex count from growing unboundedly over many substeps
+_TOUCH_EPS = 1e-6  # nm - closes a single-point/zero-width seam between sibling polygon parts;
+                    # far below any real feature size, so it never bridges a genuine gap.
 
 
 def _clean(geom: BaseGeometry) -> BaseGeometry:
@@ -37,6 +39,31 @@ def _clean(geom: BaseGeometry) -> BaseGeometry:
     if geom.is_empty:
         return geom
     return geom.buffer(0).simplify(_SIMPLIFY_TOL, preserve_topology=True)
+
+
+def _merge_touching(geom: BaseGeometry) -> BaseGeometry:
+    """Merge sibling polygon parts of a `MultiPolygon` that only touch at a single point or a
+    zero-width seam into one polygon each, instead of leaving them as separate parts that share a
+    boundary but never overlap.
+
+    `_offset_named_facets` pivots each corner's mitre/bevel fan from its own vertex independently
+    (see its docstring); two fans nucleated from opposite sides of a closing facet - most visibly
+    a `deposit_faceted` tip narrowing to a point - can end up touching at exactly one point rather
+    than overlapping over a real area. `unary_union`/`.buffer(0)` leave such parts as separate
+    `MultiPolygon` members even though they share that point: a real closing tip rendered as two
+    separate "pointed" pieces pinched together instead of one continuous shape. A vanishingly
+    small closing buffer (dilate then erode by `_TOUCH_EPS`) turns the point-contact into a shared
+    area first, merging the parts into one polygon; genuinely separate features - always many
+    orders of magnitude further apart than `_TOUCH_EPS` - are unaffected. Deliberately not folded
+    into `_clean()`, which runs on every intermediate boolean op in this module and would pay this
+    buffer's cost far more often than needed: called instead once per `Geometry.solid()` (the one
+    place every layer, however it was built, ends up merged into the single shape everything else
+    - rendering, further growth, etch - reads back), and only actually does the extra buffer work
+    on the `MultiPolygon` case it exists for.
+    """
+    if isinstance(geom, MultiPolygon) and len(geom.geoms) > 1:
+        geom = _clean(geom.buffer(_TOUCH_EPS, quad_segs=1).buffer(-_TOUCH_EPS, quad_segs=1))
+    return geom
 
 
 def _drop_tiny(geom: BaseGeometry) -> BaseGeometry:
@@ -369,7 +396,7 @@ class Geometry:
         polys = [l.polygon for l in self.layers if not l.polygon.is_empty]
         if not polys:
             return Polygon()
-        return _clean(unary_union(polys))
+        return _merge_touching(_clean(unary_union(polys)))
 
     def bounds(self) -> tuple[float, float, float, float]:
         solid = self.solid()
