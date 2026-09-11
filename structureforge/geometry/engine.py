@@ -764,7 +764,8 @@ class Geometry:
                 y_min - t,
                 y_max + max_reach,
             )
-            film = _fill_holes(_drop_tiny(_clean(film.difference(solid))))
+            film = _merge_touching(_clean(film.difference(solid)))
+            film = _fill_holes(_drop_tiny(film))
             if not film.is_empty:
                 self.layers.append(Layer(material=layer_material, polygon=film, provenance=provenance))
 
