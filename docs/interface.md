@@ -26,11 +26,15 @@ fenêtres modales (voir plus bas).
 La sidebar empile trois panneaux :
 
 1. **Substrat** - matériau, largeur du domaine et épaisseur du substrat.
-2. **Ajouter une étape** - le type d'étape choisi (dépôt, gravure, planarisation, lithographie,
-   retrait de résine, étape chimique) fait apparaître les champs propres à ce type (matériau,
-   recette, épaisseur, angle, ouvertures de masque...).
-3. **Étapes du process** - la liste ordonnée des étapes déjà ajoutées (avec suppression
-   individuelle), et le bouton **Simuler** qui déclenche le calcul de toutes les frames.
+2. **Ajouter une étape** - le type d'étape choisi (dépôt, gravure, croissance épitaxiale (SAG),
+   croissance facettée (Wulff plan C/M/semi-polaire), planarisation, lithographie, retrait de
+   résine, étape chimique) fait apparaître les champs propres à ce type (matériau, recette,
+   épaisseur, angle, orientation cristalline, ouvertures de masque...).
+3. **Étapes du process** - la liste ordonnée des étapes déjà ajoutées, avec par étape un
+   déplacement (`↑`/`↓`), une modification (**Editer** - recharge ses valeurs dans le formulaire
+   ci-dessus) et une suppression (`×`). La simulation se relance automatiquement à chaque
+   changement (statut affiché à côté, ex. « ✓ 5 étape(s) ») ; le bouton **Forcer** relance le
+   calcul manuellement si besoin.
 
 ### Épaisseur dérivée
 
