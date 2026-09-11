@@ -85,16 +85,27 @@ def _fill_holes(geom: BaseGeometry) -> BaseGeometry:
     frozen bevel edge (left over from an earlier lopsided-rate step - see `mitre_or_bevel`), each
     corner's fan is pivoted from its own vertex with no knowledge of the other, and the two fans
     can fail to reach each other, leaving a sliver of the tip ungrown - a small, real, spurious
-    interior hole in the resulting film, not a physical void (this engine has no mechanism for
-    genuine coalescence-over-a-trench voids - every part of `solid` is offset independently and
-    then unioned back together). Used only by `deposit_faceted`, the one caller whose offset
-    construction can produce this artifact.
+    interior hole, not a physical void (this engine has no mechanism for genuine coalescence-
+    over-a-trench voids - every part of `solid` is offset independently and then unioned back
+    together). The same independent-fan construction can leave this seam either *within* one
+    `deposit_faceted` call's own film (this function is applied there directly) or *between* two
+    already-clean layers once every layer is unioned together (see `Geometry.solid()`, which
+    calls this too, guarded by `_has_interior`, whenever the merged result actually has holes) -
+    both are the same artifact, just caught at a different point in the construction.
     """
     if geom.is_empty:
         return geom
     if isinstance(geom, MultiPolygon):
         return MultiPolygon([Polygon(g.exterior) for g in geom.geoms if not g.is_empty])
     return Polygon(geom.exterior)
+
+
+def _has_interior(geom: BaseGeometry) -> bool:
+    if isinstance(geom, MultiPolygon):
+        return any(len(p.interiors) > 0 for p in geom.geoms)
+    if isinstance(geom, Polygon):
+        return len(geom.interiors) > 0
+    return False
 
 
 def sweep_union(geom: BaseGeometry, vector: tuple[float, float]) -> BaseGeometry:
@@ -396,7 +407,8 @@ class Geometry:
         polys = [l.polygon for l in self.layers if not l.polygon.is_empty]
         if not polys:
             return Polygon()
-        return _merge_touching(_clean(unary_union(polys)))
+        merged = _merge_touching(_clean(unary_union(polys)))
+        return _fill_holes(merged) if _has_interior(merged) else merged
 
     def bounds(self) -> tuple[float, float, float, float]:
         solid = self.solid()

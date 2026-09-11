@@ -360,6 +360,31 @@ def test_faceted_growth_does_not_split_a_closing_tip_into_two_touching_polygons(
     assert solid.geom_type == "Polygon"
 
 
+def test_faceted_growth_does_not_leave_a_hole_between_two_otherwise_clean_layers():
+    """Another related failure mode, this time only visible once several already-hole-free layers
+    are merged together: repeated selective-area growth through a SiO2 mask window, narrowing
+    towards a point, leaves a tiny enclosed gap exactly on the growth axis between two consecutive
+    layers whose independently-computed seams don't quite line up - a spurious interior hole in
+    `Geometry.solid()` even though no single `deposit_faceted` call's own film has one (each is
+    already `Polygon`, 0 interiors, on its own). `Geometry.solid()` must strip it, per the same
+    "no genuine coalescence-over-a-trench voids" reasoning as `_fill_holes` already documents.
+    """
+    g = Geometry(domain_width_nm=140)
+    g.layers.append(Layer(material="GaN", polygon=box(0, -15, 140, 0)))
+    mask = unary_union([box(0, 0, 60, 40), box(80, 0, 140, 40)])
+    g.layers.append(Layer(material="SiO2", polygon=mask))
+    g.layers.append(Layer(material="GaN", polygon=box(60, 0, 80, 40)))
+    for _ in range(8):
+        g.deposit_faceted(
+            "GaN", thickness_nm=3.0, rate_c=1.0, rate_m=0.8, rate_sp=0.6,
+            semi_polar_angle_deg=32.0, seed_materials=["GaN"],
+        )
+
+    solid = g.solid()
+    assert solid.geom_type == "Polygon"
+    assert len(solid.interiors) == 0
+
+
 def _run_faceted(**overrides):
     g = Geometry(domain_width_nm=100)
     g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
