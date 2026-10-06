@@ -1,0 +1,27 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="dash-bootstrap-components" />
+          <option value="pandas" />
+          <option value="numpy" />
+          <option value="dash" />
+          <option value="plotly" />
+          <option value="scikit-learn" />
+          <option value="matplotlib" />
+          <option value="tqdm" />
+          <option value="Flask-Caching" />
+          <option value="fastapi" />
+          <option value="pydantic" />
+          <option value="requests" />
+          <option value="pillow" />
+          <option value="uvicorn" />
+          <option value="psutil" />
+          <option value="openpyxl" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>

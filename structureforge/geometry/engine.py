@@ -220,9 +220,14 @@ def _offset_named_facets(
         return [(point, label2)]
 
     def between_ccw(angle: float, lo: float, hi: float) -> bool:
+        # Same tolerance as `classify`: an edge whose normal is only a hair (float noise, e.g.
+        # ~1e-9 rad left by `_merge_touching`'s tiny buffer) off a named direction is already
+        # that facet, so the direction must not be inserted again as an "extra" - mitring a line
+        # against a near-parallel copy of itself yields an arbitrary point (a spurious bump that
+        # pokes outside the neighbouring facet's front, breaking the corner's symmetry).
         span = (hi - lo) % (2 * math.pi)
         rel = (angle - lo) % (2 * math.pi)
-        return 1e-9 < rel < span - 1e-9
+        return 1e-4 < rel < span - 1e-4
 
     pieces_by_family: dict[str, list[BaseGeometry]] = {}
 

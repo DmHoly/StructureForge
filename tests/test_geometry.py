@@ -385,6 +385,27 @@ def test_faceted_growth_does_not_leave_a_hole_between_two_otherwise_clean_layers
     assert len(solid.interiors) == 0
 
 
+def test_faceted_growth_corner_stays_symmetric_when_a_facet_is_tilted_by_float_noise():
+    """A c-plane top tilted by ~1e-9 rad (the kind of float noise `_merge_touching`'s tiny buffer
+    leaves behind) must still count as the c-plane at its corners - not get the c and SP
+    directions re-inserted there as "new" facets, whose near-parallel mitre produced a spurious
+    bump at one corner only: the next layer's top then stopped at the old corner's x with a
+    vertical edge instead of following the semi-polar slope.
+    """
+    theta = math.radians(40.0)
+    run = 10.0 / math.tan(theta)  # SP facet 10 nm tall at 40 deg from the c-axis
+    g = Geometry(domain_width_nm=100)
+    g.layers.append(Layer(material="GaN", polygon=Polygon([
+        (20, 0), (80, 0), (80, 40), (80 - run, 50), (20 + run, 50 + 2e-7), (20, 40),
+    ])))
+    g.deposit_faceted("GaN", thickness_nm=3.0, rate_c=1.0, rate_m=0.0, rate_sp=0.15, semi_polar_angle_deg=40.0)
+
+    top = [x for x, y in g.solid().exterior.coords if y > 52.9]
+    assert min(top) - 20 == pytest.approx(80 - max(top), abs=1e-3)
+    expected_shift = (3.0 * math.cos(theta) - 0.15 * 3.0) / math.sin(theta)  # c line meets offset SP line
+    assert min(top) == pytest.approx(20 + run + expected_shift, abs=1e-3)
+
+
 def _run_faceted(**overrides):
     g = Geometry(domain_width_nm=100)
     g.layers.append(Layer(material="GaN", polygon=box(40, 0, 60, 50)))
