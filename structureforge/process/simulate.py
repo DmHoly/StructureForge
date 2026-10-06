@@ -12,7 +12,7 @@ from ..core.recipes import RecipeLibrary
 from ..core.traced import Traced
 from ..core.units import Length
 from ..geometry.engine import Geometry, Layer, LayerProvenance
-from .steps import ChemicalStep, Deposition, EpitaxialGrowth, FacetedGrowth, Etch, Flip, Lithography, Planarization, ProcessStep, ResistStrip
+from .steps import ChemicalStep, Deposition, EpitaxialGrowth, FacetEnvelope, FacetedGrowth, Etch, Flip, Lithography, Planarization, ProcessStep, ResistStrip
 
 
 class SimulationError(RuntimeError):
@@ -162,6 +162,28 @@ def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, re
             material_c=step.material_c,
             material_m=step.material_m,
             material_sp=step.material_sp,
+            provenance=provenance,
+        )
+    elif isinstance(step, FacetEnvelope):
+        materials.get(step.material)
+        provenance = LayerProvenance(
+            step_kind=step.kind,
+            step_name=step.name,
+            parameters={
+                "c_plane": Traced.literal(step.c_plane),
+                "m_plane": Traced.literal(step.m_plane),
+                "semi_polar_angle_deg": Traced.literal(step.semi_polar_angle_deg),
+                "seed_materials": Traced.literal(list(step.seed_materials)),
+                **({"top_level": _traced_length(step.top_level)} if step.top_level is not None else {}),
+            },
+        )
+        geometry.fill_facet_envelope(
+            step.material,
+            seed_materials=list(step.seed_materials) if step.seed_materials else None,
+            c_plane=step.c_plane,
+            m_plane=step.m_plane,
+            semi_polar_angle_deg=step.semi_polar_angle_deg,
+            top_level_nm=step.top_level.to_nm() if step.top_level is not None else None,
             provenance=provenance,
         )
     elif isinstance(step, Flip):

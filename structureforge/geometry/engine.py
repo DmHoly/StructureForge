@@ -30,6 +30,9 @@ _BULK_MARGIN = 1.0e4  # nm - "effectively infinite" downward extension standing 
 _SIMPLIFY_TOL = 0.02  # nm - keeps vertex count from growing unboundedly over many substeps
 _TOUCH_EPS = 1e-6  # nm - closes a single-point/zero-width seam between sibling polygon parts;
                     # far below any real feature size, so it never bridges a genuine gap.
+_FACET_SNAP_TOL = 1e-2  # normal-vector tolerance (~0.6 deg) for an edge to count as a named crystal facet:
+                        # a c-plane top tilted by a sub-nm etch non-uniformity is still the c-plane, while
+                        # genuinely distinct facets are always several degrees apart.
 
 
 def _clean(geom: BaseGeometry) -> BaseGeometry:
@@ -184,7 +187,7 @@ def _offset_named_facets(
 
     def classify(nx: float, ny: float) -> tuple[float, str]:
         for dx, dy, d, label, _ang in named:
-            if abs(nx - dx) < 1e-4 and abs(ny - dy) < 1e-4:
+            if abs(nx - dx) < _FACET_SNAP_TOL and abs(ny - dy) < _FACET_SNAP_TOL:
                 return d, label
         return 0.0, ""
 
@@ -227,7 +230,7 @@ def _offset_named_facets(
         # pokes outside the neighbouring facet's front, breaking the corner's symmetry).
         span = (hi - lo) % (2 * math.pi)
         rel = (angle - lo) % (2 * math.pi)
-        return 1e-4 < rel < span - 1e-4
+        return _FACET_SNAP_TOL < rel < span - _FACET_SNAP_TOL
 
     pieces_by_family: dict[str, list[BaseGeometry]] = {}
 
@@ -360,6 +363,32 @@ def beam_vector(angle_deg: float, length: float) -> tuple[float, float]:
     """
     angle = math.radians(angle_deg)
     return (length * math.sin(angle), -length * math.cos(angle))
+
+
+def _half_plane(nx: float, ny: float, h: float, extent: float = 1.0e6) -> Polygon:
+    """The half-plane {p : n·p <= h} for a unit normal n, as a polygon `extent` nm across - far
+    beyond any real domain, so intersecting with it is exact for every practical purpose.
+    """
+    px, py = nx * h, ny * h
+    tx, ty = -ny * extent, nx * extent
+    return Polygon([
+        (px - tx, py - ty),
+        (px + tx, py + ty),
+        (px + tx - nx * extent, py + ty - ny * extent),
+        (px - tx - nx * extent, py - ty - ny * extent),
+    ])
+
+
+def _line_parts(geom: BaseGeometry) -> list[BaseGeometry]:
+    """Every non-degenerate LineString inside `geom`, flattening Multi*/GeometryCollections (a
+    boundary/air intersection can mix lines with stray single points)."""
+    if geom.is_empty:
+        return []
+    if geom.geom_type in ("LineString", "LinearRing"):
+        return [geom] if geom.length > 0 else []
+    if hasattr(geom, "geoms"):
+        return [line for part in geom.geoms for line in _line_parts(part)]
+    return []
 
 
 class LayerProvenance(BaseModel):
@@ -830,6 +859,83 @@ class Geometry:
             film = _fill_holes(_drop_tiny(film))
             if not film.is_empty:
                 self.layers.append(Layer(material=layer_material, polygon=film, provenance=provenance))
+
+    def fill_facet_envelope(
+        self,
+        material: str,
+        seed_materials: list[str] | None = None,
+        c_plane: bool = True,
+        m_plane: bool = False,
+        semi_polar_angle_deg: float | None = None,
+        top_level_nm: float | None = None,
+        provenance: LayerProvenance | None = None,
+    ) -> None:
+        """"Catch up" the crystal planes: impose an ideal faceted shape instead of growing one
+        rate by rate. Each chosen facet family - c-plane (0,1), m-plane (±1,0), semi-polar
+        (±sin θ, cos θ) - is pushed outward until it just touches the outermost exposed point of
+        the crystal, and everything below those planes that isn't already solid is filled with
+        `material`. Typical uses: a sharp pyramid on a pedestal's flat top (semi-polar only - the
+        two SP planes through the top's edges meet at the apex), or squaring up an irregular
+        crystal into clean c/m/SP facets before growing a conformal MQW stack on it.
+
+        The crystal is the exposed surface of `seed_materials` (default: `[material]`) - whatever
+        is touching air, so a SAG mask covering the rest of the wafer keeps it out. Separate
+        exposed regions (e.g. one per mask opening) each get their own envelope. Each envelope is
+        bounded below by its region's lowest exposed point; with no lateral facet chosen (neither
+        m-plane nor semi-polar) it's bounded by the region's own x-range, i.e. implicit m-planes.
+
+        `top_level_nm`, if given, truncates every envelope with a c-plane at that absolute level
+        (a truncated pyramid / flat-topped pencil of a chosen height). The envelope must be bounded
+        above: give `c_plane`, `semi_polar_angle_deg` or `top_level_nm`.
+        """
+        if not c_plane and semi_polar_angle_deg is None and top_level_nm is None:
+            raise ValueError("fill_facet_envelope needs c_plane, semi_polar_angle_deg or top_level_nm to bound the shape above")
+        if not self.layers:
+            return
+        solid = self.solid()
+        if solid.is_empty:
+            return
+        y_min, y_max = solid.bounds[1], solid.bounds[3]
+
+        seeds = seed_materials or [material]
+        seed_polys = [l.polygon for l in self.layers if l.material in seeds and not l.polygon.is_empty]
+        if not seed_polys:
+            return
+        # Air starts exactly at y_min so the wafer's backside never counts as exposed; the domain's
+        # left/right edges don't either, since there is no air outside the domain box.
+        air = self._domain_box(y_min, y_max + 1.0).difference(solid)
+        exposed = unary_union(seed_polys).boundary.intersection(air.buffer(1e-5))
+        lines = _line_parts(exposed)
+        if not lines:
+            return
+
+        normals: list[tuple[float, float]] = []
+        if c_plane:
+            normals.append((0.0, 1.0))
+        if m_plane:
+            normals += [(1.0, 0.0), (-1.0, 0.0)]
+        if semi_polar_angle_deg is not None:
+            theta = math.radians(semi_polar_angle_deg)
+            normals += [(math.sin(theta), math.cos(theta)), (-math.sin(theta), math.cos(theta))]
+        if not m_plane and semi_polar_angle_deg is None:
+            normals += [(1.0, 0.0), (-1.0, 0.0)]
+
+        blobs = unary_union([line.buffer(1.0) for line in lines])
+        envelopes = []
+        for blob in (blobs.geoms if isinstance(blobs, MultiPolygon) else [blobs]):
+            points = [p for line in lines if line.intersects(blob) for p in line.coords]
+            base = min(y for _, y in points)
+            top = top_level_nm if top_level_nm is not None else y_max + _BULK_MARGIN
+            if top <= base:
+                continue
+            envelope = box(0.0, base, self.domain_width_nm, top)
+            for nx, ny in normals:
+                envelope = envelope.intersection(_half_plane(nx, ny, max(nx * x + ny * y for x, y in points)))
+            envelopes.append(self._crop(envelope.difference(solid), base, top))
+
+        film = _drop_tiny(_clean(unary_union(envelopes))) if envelopes else Polygon()
+        if not film.is_empty:
+            self.layers.append(Layer(material=material, polygon=film, provenance=provenance))
 
     def etch(
         self,

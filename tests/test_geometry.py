@@ -494,3 +494,68 @@ def test_deposit_epitaxial_attaches_the_given_provenance():
 
     new_layer = g.layers[-1]
     assert new_layer.provenance is provenance
+
+
+def _pedestal_in_mask():
+    """A 100 nm wide GaN pedestal (top at y=20) in a 40 nm SiO2 mask opening, on a GaN wafer."""
+    g = Geometry(domain_width_nm=500)
+    g.layers.append(Layer(material="GaN", polygon=box(0, -50, 500, 0)))
+    g.layers.append(Layer(material="SiO2", polygon=unary_union([box(0, 0, 200, 40), box(300, 0, 500, 40)])))
+    g.layers.append(Layer(material="GaN", polygon=box(200, 0, 300, 20)))
+    return g
+
+
+def test_facet_envelope_with_only_semi_polar_planes_builds_the_pyramid_on_a_flat_top():
+    g = _pedestal_in_mask()
+    g.fill_facet_envelope("GaN", c_plane=False, semi_polar_angle_deg=30.0)
+
+    pyramid = g.layers[-1].polygon
+    apex_height = 50.0 * math.tan(math.radians(30.0))
+    assert pyramid.area == pytest.approx(0.5 * 100 * apex_height, rel=1e-6)
+    assert pyramid.bounds == pytest.approx((200.0, 20.0, 300.0, 20.0 + apex_height), abs=1e-6)
+
+
+def test_facet_envelope_top_level_truncates_the_pyramid():
+    g = _pedestal_in_mask()
+    g.fill_facet_envelope("GaN", c_plane=False, semi_polar_angle_deg=30.0, top_level_nm=30.0)
+
+    assert g.layers[-1].polygon.bounds[3] == pytest.approx(30.0)
+    top_width = 100.0 - 2 * 10.0 / math.tan(math.radians(30.0))
+    assert g.layers[-1].polygon.area == pytest.approx(10.0 * (100.0 + top_width) / 2, rel=1e-6)
+
+
+def test_facet_envelope_adds_nothing_to_an_already_regular_crystal():
+    g = _pedestal_in_mask()
+    n_layers = len(g.layers)
+    g.fill_facet_envelope("GaN", c_plane=True, m_plane=True)
+    assert len(g.layers) == n_layers
+
+
+def test_facet_envelope_gives_each_mask_opening_its_own_shape():
+    g = Geometry(domain_width_nm=500)
+    g.layers.append(Layer(material="GaN", polygon=box(0, -50, 500, 0)))
+    g.layers.append(Layer(material="SiO2", polygon=unary_union([box(0, 0, 100, 20), box(150, 0, 350, 20), box(400, 0, 500, 20)])))
+    g.fill_facet_envelope("GaN", c_plane=False, semi_polar_angle_deg=45.0)
+
+    film = g.layers[-1].polygon
+    assert film.geom_type == "MultiPolygon" and len(film.geoms) == 2
+    # Each pyramid stands on its own 50 nm opening floor (y=0): apex 25 nm up, x-centred on it.
+    for part, centre in zip(sorted(film.geoms, key=lambda p: p.centroid.x), (125.0, 375.0)):
+        assert part.bounds[3] == pytest.approx(25.0, abs=1e-4)
+        assert part.centroid.x == pytest.approx(centre, abs=1e-4)
+
+
+def test_facet_envelope_needs_something_bounding_it_above():
+    with pytest.raises(ValueError):
+        _pedestal_in_mask().fill_facet_envelope("GaN", c_plane=False, m_plane=True)
+
+
+def test_faceted_growth_grows_a_c_plane_top_tilted_by_a_sub_nm_etch_non_uniformity():
+    """A pedestal top tilted by 0.07 nm over 100 nm (7e-4 rad - what a slightly non-uniform
+    over-etch leaves) is still the c-plane: it must rise, not stay frozen while only its corners
+    grow."""
+    g = Geometry(domain_width_nm=200)
+    g.layers.append(Layer(material="GaN", polygon=Polygon([(50, 0), (150, 0), (150, 19.93), (50, 20)])))
+    g.deposit_faceted("GaN", thickness_nm=10.0, rate_c=1.0, rate_m=0.0, rate_sp=0.0)
+    assert g.solid().bounds[3] == pytest.approx(30.0, abs=0.01)
+    assert g.layers[-1].polygon.area == pytest.approx(100 * 10, rel=1e-3)

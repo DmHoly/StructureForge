@@ -213,6 +213,7 @@ calculé si `Length.derived(...)`.
 |---|---|
 | `EpitaxialGrowth` | ✅ (`thickness`, `orientation`, `angle_deg`, `seed_materials`) |
 | `FacetedGrowth` | ✅ (`thickness`, `rate_c`, `rate_m`, `rate_sp`, `semi_polar_angle_deg`, `seed_materials`) |
+| `FacetEnvelope` | ✅ (`c_plane`, `m_plane`, `semi_polar_angle_deg`, `seed_materials`, `top_level` si fourni) |
 | `Deposition`, `Etch`, `Lithography`, `Planarization`, `Flip`, `ResistStrip`, `ChemicalStep` | ❌ - `Layer.provenance` reste `None` |
 
 `Geometry.deposit_epitaxial()` et `Geometry.deposit_faceted()` acceptent un paramètre

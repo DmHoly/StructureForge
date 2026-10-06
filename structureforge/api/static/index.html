@@ -44,6 +44,7 @@
               <option value="etch">Gravure</option>
               <option value="epitaxial_growth">Croissance epitaxiale (SAG)</option>
               <option value="faceted_growth">Croissance facettee (Wulff C/M/SP)</option>
+              <option value="facet_envelope">Rattrapage des plans (forme facettee imposee)</option>
               <option value="planarization">Planarisation</option>
               <option value="lithography">Lithographie (masque resine)</option>
               <option value="resist_strip">Retrait de resine</option>
@@ -108,6 +109,43 @@
           </div>
           <label>Seed materials — SAG (vide = pas de selectivite)
             <input id="fac-seed-materials" type="text" placeholder="ex. GaN, AlN" />
+          </label>
+        </div>
+
+        <div id="fields-facet_envelope" class="step-fields">
+          <label>Materiau
+            <select id="env-material"></select>
+          </label>
+          <p class="epi-hint">Chaque plan coche est pousse jusqu'au point le plus exterieur du cristal expose, puis tout ce qui est sous ces plans est rempli. SP seuls sur un sommet plat = pyramide.</p>
+          <div class="field-row">
+            <label>Plan C (sommet plat)
+              <select id="env-c-plane">
+                <option value="no">Non</option>
+                <option value="yes">Oui</option>
+              </select>
+            </label>
+            <label>Plan M (flancs verticaux)
+              <select id="env-m-plane">
+                <option value="no">Non</option>
+                <option value="yes">Oui</option>
+              </select>
+            </label>
+          </div>
+          <label>Angle semi-polaire (deg, depuis c-axe — vide = pas de SP)
+            <input id="env-angle-sp" type="number" value="30" min="1" max="89" step="1" />
+          </label>
+          <label>Troncature
+            <select id="env-top-mode">
+              <option value="none">Aucune</option>
+              <option value="level">Plan C a un niveau donne</option>
+            </select>
+          </label>
+          <div id="env-top-wrap" class="length-field-block" style="display:none">
+            <span class="length-field-label">Niveau du sommet (0 = haut du substrat)</span>
+            <div id="env-top-level"></div>
+          </div>
+          <label>Seed materials — cristal a rattraper (vide = le materiau ci-dessus)
+            <input id="env-seed-materials" type="text" placeholder="ex. GaN" />
           </label>
         </div>
 

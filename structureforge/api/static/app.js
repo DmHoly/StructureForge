@@ -217,13 +217,14 @@ async function loadLibraries() {
   for (const m of materials) state.materialColors[m.name] = m.color;
 
   const materialNames = materials.map((m) => m.name);
-  for (const id of ["substrate-material", "dep-material", "epi-material", "fac-material", "pla-stop-material", "litho-material", "strip-material"]) {
+  for (const id of ["substrate-material", "dep-material", "epi-material", "fac-material", "env-material", "pla-stop-material", "litho-material", "strip-material"]) {
     $(id).innerHTML = optionsHtml(materialNames);
   }
   $("litho-material").value = materialNames.includes("Photoresist") ? "Photoresist" : materialNames[0];
   $("strip-material").value = materialNames.includes("Photoresist") ? "Photoresist" : materialNames[0];
   $("epi-material").value = materialNames.includes("GaN") ? "GaN" : materialNames[0];
   $("fac-material").value = materialNames.includes("GaN") ? "GaN" : materialNames[0];
+  $("env-material").value = materialNames.includes("GaN") ? "GaN" : materialNames[0];
 
   $("dep-recipe").innerHTML = optionsHtml(recipes.deposition.map((r) => r.name));
   $("etch-recipe").innerHTML = optionsHtml(recipes.etch.map((r) => r.name));
@@ -259,6 +260,10 @@ function updateFacetedTipHint() {
 function switchEpiOrientation() {
   const orientation = $("epi-orientation").value;
   $("epi-angle-wrap").style.display = orientation === "semi_polar" ? "flex" : "none";
+}
+
+function switchEnvelopeTopMode() {
+  $("env-top-wrap").style.display = $("env-top-mode").value === "level" ? "flex" : "none";
 }
 
 function switchPlanarizationMode() {
@@ -327,6 +332,20 @@ function buildStepFromForm() {
       semi_polar_angle_deg: parseFloat($("fac-angle-sp").value),
       seed_materials: seedText ? seedText.split(",").map((s) => s.trim()).filter(Boolean) : [],
     };
+  }
+  if (kind === "facet_envelope") {
+    const seedText = $("env-seed-materials").value.trim();
+    const angleText = $("env-angle-sp").value.trim();
+    const step = {
+      kind, name,
+      material: $("env-material").value,
+      c_plane: $("env-c-plane").value === "yes",
+      m_plane: $("env-m-plane").value === "yes",
+      semi_polar_angle_deg: angleText ? parseFloat(angleText) : null,
+      seed_materials: seedText ? seedText.split(",").map((s) => s.trim()).filter(Boolean) : [],
+    };
+    if ($("env-top-mode").value === "level") step.top_level = state.lengthFields["env-top-level"].get();
+    return step;
   }
   if (kind === "epitaxial_growth") {
     const orientation = $("epi-orientation").value;
@@ -465,6 +484,15 @@ function populateFormFromStep(step) {
     $("fac-angle-sp").value = step.semi_polar_angle_deg ?? 30;
     $("fac-seed-materials").value = (step.seed_materials || []).join(", ");
     updateFacetedTipHint();
+  } else if (step.kind === "facet_envelope") {
+    $("env-material").value = step.material;
+    $("env-c-plane").value = step.c_plane === false ? "no" : "yes";
+    $("env-m-plane").value = step.m_plane ? "yes" : "no";
+    $("env-angle-sp").value = step.semi_polar_angle_deg ?? "";
+    $("env-seed-materials").value = (step.seed_materials || []).join(", ");
+    $("env-top-mode").value = step.top_level ? "level" : "none";
+    if (step.top_level) state.lengthFields["env-top-level"].set(step.top_level);
+    switchEnvelopeTopMode();
   } else if (step.kind === "epitaxial_growth") {
     $("epi-material").value = step.material;
     state.lengthFields["epi-thickness"].set(step.thickness);
@@ -913,6 +941,7 @@ function wireEvents() {
     $(id).addEventListener("input", updateFacetedTipHint);
   }
   $("pla-mode").addEventListener("change", switchPlanarizationMode);
+  $("env-top-mode").addEventListener("change", switchEnvelopeTopMode);
 
   // Substrate changes → auto-simulate
   for (const id of ["substrate-material", "domain-width", "substrate-thickness"]) {
@@ -975,6 +1004,7 @@ function createLengthFields() {
     "fac-thickness": createLengthField("fac-thickness", { defaultValue: 10 }),
     "epi-thickness": createLengthField("epi-thickness", { defaultValue: 20 }),
     "pla-level": createLengthField("pla-level", { defaultValue: 0, allowNegative: true }),
+    "env-top-level": createLengthField("env-top-level", { defaultValue: 50, allowNegative: true }),
     "litho-thickness": createLengthField("litho-thickness", { defaultValue: 5 }),
   };
 }

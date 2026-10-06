@@ -183,6 +183,40 @@ class FacetedGrowth(BaseModel):
         return self
 
 
+class FacetEnvelope(BaseModel):
+    """"Catch up" the crystal planes: impose an ideal faceted shape on the exposed crystal
+    instead of growing one rate by rate.
+
+    Each chosen facet family - c-plane, m-plane, semi-polar at `semi_polar_angle_deg` from the
+    c-axis - is pushed outward until it just touches the outermost exposed point of
+    `seed_materials` (default: `material` itself), and everything under those planes is filled
+    with `material`. Semi-polar only on a flat pedestal top gives the sharp pyramid sitting on
+    that top; c + m + semi-polar squares up an irregular crystal into clean facets.
+    `top_level`, if set, truncates the shape with a c-plane at that absolute level. Separate
+    exposed regions (one per mask opening) each get their own shape. See
+    `Geometry.fill_facet_envelope`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["facet_envelope"] = "facet_envelope"
+    name: str
+    material: str
+    seed_materials: list[str] = Field(default_factory=list)
+    c_plane: bool = True
+    m_plane: bool = False
+    semi_polar_angle_deg: float | None = None
+    top_level: Length | None = None
+
+    @model_validator(mode="after")
+    def _check_facets(self) -> "FacetEnvelope":
+        if self.semi_polar_angle_deg is not None and not (0.0 < self.semi_polar_angle_deg < 90.0):
+            raise ValueError(f"semi_polar_angle_deg must be in (0, 90), got {self.semi_polar_angle_deg}")
+        if not self.c_plane and self.semi_polar_angle_deg is None and self.top_level is None:
+            raise ValueError("the shape needs a top: enable c_plane, set semi_polar_angle_deg or set top_level")
+        return self
+
+
 class EpitaxialGrowth(BaseModel):
     """Selective-area epitaxial growth (homo- or hetero-epitaxy) for III-N and related systems.
 
@@ -227,6 +261,7 @@ ProcessStep = Annotated[
         ResistStrip,
         EpitaxialGrowth,
         FacetedGrowth,
+        FacetEnvelope,
         Flip,
     ],
     Field(discriminator="kind"),
