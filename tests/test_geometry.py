@@ -559,3 +559,91 @@ def test_faceted_growth_grows_a_c_plane_top_tilted_by_a_sub_nm_etch_non_uniformi
     g.deposit_faceted("GaN", thickness_nm=10.0, rate_c=1.0, rate_m=0.0, rate_sp=0.0)
     assert g.solid().bounds[3] == pytest.approx(30.0, abs=0.01)
     assert g.layers[-1].polygon.area == pytest.approx(100 * 10, rel=1e-3)
+
+
+def _masked_opening(width=400.0, opening=(150.0, 250.0), mask_material="SiO2", mask_height=50.0):
+    """A GaN wafer under a mask with one opening, its floor exposed - the SAG starting point."""
+    g = Geometry.substrate("GaN", domain_width_nm=width, thickness_nm=50)
+    x0, x1 = opening
+    g.layers.append(Layer(material=mask_material, polygon=box(0, 0, x0, mask_height)))
+    g.layers.append(Layer(material=mask_material, polygon=box(x1, 0, width, mask_height)))
+    return g
+
+
+def test_seed_materials_match_composition_named_alloys_by_family():
+    from structureforge.geometry.engine import seed_matches
+
+    assert seed_matches("In0.10Ga0.90N", ["GaN", "InGaN"])
+    assert seed_matches("Al0.20Ga0.80N", ["AlGaN"])
+    assert not seed_matches("In0.10Ga0.90N", ["GaN"])
+    assert not seed_matches("SiO2", ["GaN", "InGaN"])
+
+
+def test_faceted_sag_grows_on_an_alloy_named_by_its_family():
+    """`seed_materials=["InGaN"]` must accept an `In0.10Ga0.90N` QW as seed, not treat it as a mask."""
+    g = Geometry.substrate("GaN", domain_width_nm=100, thickness_nm=50)
+    g.layers.append(Layer(material="In0.10Ga0.90N", polygon=box(0, 0, 100, 10)))
+    g.deposit_faceted("GaN", 10, rate_c=1, rate_m=0, rate_sp=0, seed_materials=["InGaN"])
+    assert g.layers[-1].material == "GaN"
+    assert g.layers[-1].polygon.area == pytest.approx(100 * 10, rel=1e-6)
+
+
+def test_faceted_sag_is_not_blocked_by_a_sub_nm_mask_residue_on_the_opening_floor():
+    """A non-seed film a fraction of an angstrom thick on part of the floor (an etch that stopped
+    a hair short) used to block growth over the residue's whole bounding box - i.e. the opening."""
+    g = _masked_opening()
+    g.layers.append(Layer(material="SiO2", polygon=box(200, 0, 250, 0.05)))
+    g.deposit_faceted("GaN", 10, rate_c=1, rate_m=0, rate_sp=0, seed_materials=["GaN"])
+    film = g.layers[-1].polygon
+    assert film.bounds[0] == pytest.approx(150, abs=0.1)
+    assert film.area > 90 * 10
+
+
+def test_faceted_sag_overflows_the_mask_and_grows_exact_semi_polar_facets():
+    """Growth thicker than the mask must fill the opening, then spread over it with straight
+    45 deg facets - not stay a straight pillar (one-shot offset) nor build a staircase of tiny
+    c/m steps (fans overshooting a nucleating facet) - and stay mirror-symmetric."""
+    from shapely.affinity import scale
+
+    g = _masked_opening()
+    g.deposit_faceted("GaN", 120, rate_c=1, rate_m=0.3, rate_sp=0.7, semi_polar_angle_deg=45, seed_materials=["GaN"])
+    solid = g.solid()
+    mirrored = scale(solid, xfact=-1, origin=(200, 0))
+    assert solid.symmetric_difference(mirrored).area < 1.0
+    assert solid.bounds[3] == pytest.approx(120, abs=0.5)
+    # lateral overgrowth beyond the opening, over the mask top
+    grown = g.layers[-1].polygon
+    assert grown.bounds[0] < 150 - 10 and grown.bounds[2] > 250 + 10
+    # the crystal's outline above the mask has only c, m and SP edges - no staircase
+    top = solid.intersection(box(0, 51, 400, 200))
+    edges = list(zip(top.exterior.coords, top.exterior.coords[1:]))
+    long_edges = [(a, b) for a, b in edges if math.dist(a, b) > 1.0]
+    assert len(long_edges) <= 6
+
+
+def test_epitaxial_sag_is_not_blocked_by_a_sub_nm_mask_residue_on_the_opening_floor():
+    g = _masked_opening()
+    g.layers.append(Layer(material="SiO2", polygon=box(200, 0, 250, 0.05)))
+    g.deposit_epitaxial("GaN", 10, seed_materials=["GaN"])
+    film = g.layers[-1].polygon
+    assert film.bounds[0] == pytest.approx(150, abs=0.1)
+    assert film.bounds[2] == pytest.approx(250, abs=0.1)
+
+
+
+def test_faceted_growth_on_an_etched_floor_with_angstrom_terraces_keeps_a_flat_top():
+    """An etch leaves the floor of an opening in terraces a fraction of a nanometre apart. Each
+    riser between them used to act as a tiny facet of its own and - with a semi-polar rate just
+    under its critical value - widen into a V pit carried up through the whole crystal (a notch
+    in every layer grown on top)."""
+    g = Geometry.substrate("GaN", domain_width_nm=400, thickness_nm=50)
+    g.layers[0].polygon = Polygon([
+        (0, -50), (400, -50), (400, 0), (250, 0), (250, -0.1), (190, -0.1), (190, -0.03), (150, -0.03), (150, 0), (0, 0),
+    ])
+    g.layers.append(Layer(material="SiO2", polygon=box(0, 0, 150, 50)))
+    g.layers.append(Layer(material="SiO2", polygon=box(250, 0, 400, 50)))
+    g.deposit_faceted("GaN", 120, rate_c=1, rate_m=0.1, rate_sp=0.7, semi_polar_angle_deg=45, seed_materials=["GaN"])
+
+    top = g.solid().intersection(box(0, 100, 400, 200))
+    lowest_of_top = min(y for x, y in top.exterior.coords if 160 < x < 240)
+    assert lowest_of_top > top.bounds[3] - 0.5

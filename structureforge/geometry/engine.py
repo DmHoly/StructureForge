@@ -10,11 +10,17 @@ not oversights.
 from __future__ import annotations
 
 import math
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
+
+import numpy as np
+import shapely
+import shapely.errors
 
 from pydantic import BaseModel, ConfigDict, Field
 from shapely.affinity import scale, translate
-from shapely.geometry import MultiPolygon, Polygon, box
+from shapely.geometry import MultiPolygon, Point, Polygon, box
 from shapely.geometry.base import BaseGeometry
 from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
@@ -24,6 +30,10 @@ from ..core.recipes import DepositionMode, DepositionRecipe, EtchMode, EtchRecip
 from ..core.traced import Traced
 
 _EPS_AREA = 1e-6  # nm^2 - polygons smaller than this are numerical noise, dropped
+_SEAM_EPS = 0.01  # nm - closing radius that seals seams between pieces of one film, see _close_seams
+_FLAP_EPS = 1e-4  # nm - opening radius that removes zero-thickness flaps from a film, see _close_seams
+_SLIVER_WIDTH = 0.025  # nm - polygons under 2x this mean thickness (2 * area / perimeter) are noise too:
+                      # hairlines a near-vertical flank leaves when swept up, far below one monolayer
 _MARGIN = 1.0  # nm of slack padding used around bounding boxes for directional etch
 _GUARD_MARGIN = 1.0e4  # nm - "effectively infinite" padding for other-factor layers during etch, see Geometry.etch
 _BULK_MARGIN = 1.0e4  # nm - "effectively infinite" downward extension standing in for the wafer's bulk, see floor_nm
@@ -69,15 +79,43 @@ def _merge_touching(geom: BaseGeometry) -> BaseGeometry:
     return geom
 
 
+def _is_real(g: BaseGeometry) -> bool:
+    """A polygon worth keeping: not numerical noise, either in area or as a zero-width sliver left
+    along a shared boundary by two boolean ops that disagree in the last few bits."""
+    return isinstance(g, Polygon) and g.area > _EPS_AREA and g.area > _SLIVER_WIDTH * g.length
+
+
+def _close_seams(geom: BaseGeometry, solid: BaseGeometry | None = None) -> BaseGeometry:
+    """Morphological closing then opening by `_SEAM_EPS`, for a film assembled from many pieces
+    (strips, fans, substeps) and differenced against the solid it grew on. Where those boundaries
+    disagree in the last few bits, the film otherwise keeps zero-width slits inside one polygon,
+    parts a hair apart, or zero-thickness flaps running along an interface - all drawn as stray
+    lines across the layer. Closing by `_SEAM_EPS` seals the first two, and a much finer opening
+    by `_FLAP_EPS` removes the third - fine enough to keep a thin but real wedge (e.g. the one
+    holding an overgrowth front down on a mask). Mitre joins leave real corners where they are. `solid`, if given, is subtracted again afterwards,
+    since closing can reach a hair into a concave corner of it."""
+    if geom.is_empty:
+        return geom
+    mitre = {"join_style": "mitre"}
+    with np.errstate(divide="ignore", invalid="ignore"):  # GEOS mitre on a degenerate segment - harmless
+        geom = geom.buffer(_SEAM_EPS, **mitre).buffer(-_SEAM_EPS - _FLAP_EPS, **mitre).buffer(_FLAP_EPS, **mitre)
+    if solid is not None and not geom.is_empty:
+        geom = geom.difference(solid)
+    return _clean(geom)
+
+
 def _drop_tiny(geom: BaseGeometry) -> BaseGeometry:
     if geom.is_empty:
         return geom
-    if isinstance(geom, MultiPolygon):
-        kept = [g for g in geom.geoms if g.area > _EPS_AREA]
+    if hasattr(geom, "geoms"):
+        # A MultiPolygon - or a GeometryCollection, when a boolean op leaves stray lines/points
+        # (an edge merely touching the crop box) next to the real area: only polygons are kept.
+        flat = [p for g in geom.geoms for p in (g.geoms if isinstance(g, MultiPolygon) else [g])]
+        kept = [g for g in flat if _is_real(g)]
         if not kept:
             return Polygon()
         return kept[0] if len(kept) == 1 else MultiPolygon(kept)
-    return geom if geom.area > _EPS_AREA else Polygon()
+    return geom if _is_real(geom) else Polygon()
 
 
 def _fill_holes(geom: BaseGeometry) -> BaseGeometry:
@@ -111,6 +149,40 @@ def _has_interior(geom: BaseGeometry) -> bool:
     return False
 
 
+_ALLOY_NAME = re.compile(r"^(In|Al)\d+(?:\.\d+)?Ga\d+(?:\.\d+)?N$")
+_SEED_PROBE_DEPTH = 0.25  # nm - how far inside an exposed edge to look for the material it belongs to:
+                          # deep enough to see past an etch's sub-angstrom residue film, far thinner
+                          # than any real layer.
+_RESIDUE_NM = 0.1  # nm - etched layers thinner than twice this are leftover residue, see Geometry.etch
+_FRONT_SMOOTH = 0.2  # nm - bumps below this are trimmed off a growth front, see Geometry._deposit_faceted_once
+_MIN_NUCLEATION_EDGE = 1.0  # nm - a shorter edge between two parallel ones is a step, not a facet, see _offset_named_facets
+_VICINAL_COS = math.cos(math.radians(10.0))
+_VICINAL_SIN = math.sin(math.radians(10.0))  # an edge within 10 deg of a facet grows like it, see _offset_named_facets
+_UNION_GRID = 1e-4  # nm - snap grid for _robust_union's fallback
+_SPLIT_TOL = 0.05  # nm - a layer vertex this close to a solid edge splits that edge (covers _SIMPLIFY_TOL drift)
+
+
+def seed_matches(material: str, seed_materials: list[str]) -> bool:
+    """Whether a layer of `material` counts as one of `seed_materials`: an exact name, or the alloy
+    family of a composition-named ternary nitride - `"InGaN"` matches `In0.10Ga0.90N`, `"AlGaN"`
+    matches `Al0.20Ga0.80N` (see `structureforge.core.materials.indium_gan`), so a seed list
+    doesn't have to spell out every composition a stack happens to use.
+    """
+    if material in seed_materials:
+        return True
+    m = _ALLOY_NAME.match(material)
+    return bool(m) and f"{m.group(1)}GaN" in seed_materials
+
+
+def _robust_union(geoms: list[BaseGeometry]) -> BaseGeometry:
+    """`unary_union`, falling back to a snap-rounded union when GEOS's floating-point noding fails
+    on many tiny, nearly coincident pieces (a "found two shells" / TopologyException)."""
+    try:
+        return unary_union(geoms)
+    except shapely.errors.GEOSException:
+        return shapely.union_all([g for g in geoms if not g.is_empty], grid_size=_UNION_GRID)
+
+
 def sweep_union(geom: BaseGeometry, vector: tuple[float, float]) -> BaseGeometry:
     """The exact Minkowski sum of `geom` with the segment from (0,0) to `vector` - this is what
     "directional" deposition/etch actually mean: a uniform offset in one direction, rather than
@@ -141,7 +213,10 @@ def sweep_union(geom: BaseGeometry, vector: tuple[float, float]) -> BaseGeometry
 
 
 def _offset_named_facets(
-    solid: BaseGeometry, named_directions: list[tuple[float, float, float, str]]
+    solid: BaseGeometry,
+    named_directions: list[tuple[float, float, float, str]],
+    edge_active: Callable[[tuple[float, float], tuple[float, float], tuple[float, float]], bool] | None = None,
+    x_window: tuple[float, float] | None = None,
 ) -> dict[str, BaseGeometry]:
     """Advance each straight edge of `solid`'s exterior ring(s) along its own outward normal by
     the distance named for that exact direction in `named_directions` (nx, ny, distance, family
@@ -158,13 +233,17 @@ def _offset_named_facets(
     This is a per-facet offset, not a global one. For each vertex, the two adjacent edges' offset
     lines (plus, at a convex corner, any named direction whose normal cone falls strictly between
     them and isn't already an edge there - inserted as new facet(s), splitting the corner into a
-    short chain of mitre points) are intersected pairwise, giving that vertex a `near` point (where
-    its incoming edge's line meets the chain) and a `far` point (where the chain meets its outgoing
-    edge's line). Two pieces per vertex/edge reconstruct the grown boundary: a mitre-fill polygon
-    fanned from the vertex through its whole chain whenever more than one point was needed there,
-    and - for every edge with a nonzero distance - a strip from that edge's own two endpoints to
-    its neighbours' `far`/`near` points. A zero-distance edge needs neither: it's already part of
-    `solid`, unchanged, and its neighbours' own strips/fans butt up against its two endpoints as-is.
+    short chain of mitre points) are intersected pairwise. The grown area is the union of two kinds
+    of convex piece: for every edge with a nonzero distance, the plain rectangle it sweeps along its
+    normal; and at every corner, the fan from the vertex through its chain of mitre points (at a
+    concave corner, only when the mitre lands close by - otherwise the two rectangles already
+    meet). Every piece is clipped by the offset lines of the facets around it - its own edges, the
+    facets nucleating at its corners, and up to two more edges each way across convex corners -
+    so pieces built independently at neighbouring corners can't overshoot one another: a c-plane
+    top consumed by its flanking SP facets closes to a single apex, and a nucleating SP facet
+    trims the neighbouring c-plane strip exactly instead of leaving a sliver of it behind. Only
+    true facets bound their neighbours: an off-axis, non-moving edge (a curved mask wall) does not.
+    An edge within 10 degrees of a facet (a vicinal surface) grows like that facet.
 
     This gives a rate of 0 a real guarantee a shared global growth vector never could: that facet's
     *own line* never moves, no matter how far a neighbouring facet advances - only how much of it
@@ -181,14 +260,36 @@ def _offset_named_facets(
     point would land past `1.5 * (d1 + d2)` from the vertex, `mitre_or_bevel` bevels that corner
     instead - the two facets' plain per-line offsets, joined by a short straight cut - rather than
     chase a point that distant.
+
+    `edge_active(p1, p2, normal)`, if given, restricts growth to the edges it accepts (SAG: only
+    edges made of a seed material) - every other edge is treated as rate 0 whatever its direction,
+    and a new facet only nucleates at a convex corner whose two edges are both active.
+
+    `x_window`, if given, skips every corner and edge lying entirely outside that x-range (the
+    far parts of a mirror-padded solid, whose growth would be cropped away anyway).
     """
+    facet_normals = [(nx, ny) for nx, ny, _d, _label in named_directions]
     named_directions = [(nx, ny, d, label) for nx, ny, d, label in named_directions if d > 1e-9]
     named = [(nx, ny, d, label, math.atan2(ny, nx)) for nx, ny, d, label in named_directions]
+
+    def outside(*xs: float) -> bool:
+        return x_window is not None and (all(x < x_window[0] for x in xs) or all(x > x_window[1] for x in xs))
+
+    def is_facet(nx: float, ny: float) -> bool:
+        return any(abs(nx - fx) < _FACET_SNAP_TOL and abs(ny - fy) < _FACET_SNAP_TOL for fx, fy in facet_normals)
 
     def classify(nx: float, ny: float) -> tuple[float, str]:
         for dx, dy, d, label, _ang in named:
             if abs(nx - dx) < _FACET_SNAP_TOL and abs(ny - dy) < _FACET_SNAP_TOL:
                 return d, label
+        # A vicinal surface - a few degrees off a facet, e.g. the floor of a sub-nm etch dip -
+        # grows by step flow at that facet's rate rather than staying pinned: left pinned, it would
+        # persist as a crevice carried up through every later layer.
+        fx, fy, d, label = max(((dx, dy, d, label) for dx, dy, d, label, _ang in named), key=lambda e: e[0] * nx + e[1] * ny, default=(0.0, 0.0, 0.0, ""))
+        if fx * nx + fy * ny > _VICINAL_COS and not any(
+            abs(nx - px) < _FACET_SNAP_TOL and abs(ny - py) < _FACET_SNAP_TOL for px, py in facet_normals
+        ):
+            return d, label
         return 0.0, ""
 
     def mitre_or_bevel(
@@ -214,7 +315,9 @@ def _offset_named_facets(
         c, d = n2
         det = a * d - b * c
         if abs(det) < 1e-9:
-            return [(p1, label2)]
+            # Collinear edges advancing by different amounts (an active edge next to an inactive
+            # one): keep both offsets, so the step between them is a straight cut at `v`.
+            return [(p1, label2)] if abs(d1 - d2) < 1e-12 else [(p1, label1), (p2, label2)]
         px = (d1 * d - b * d2) / det
         py = (a * d2 - c * d1) / det
         point = (v[0] + px, v[1] + py)
@@ -247,32 +350,73 @@ def _offset_named_facets(
             continue
 
         normals: list[tuple[float, float]] = []
+        lengths: list[float] = []
         dists: list[float] = []
         labels: list[str] = []
+        active: list[bool] = []
         for i in range(n):
             x1, y1 = coords[i]
             x2, y2 = coords[(i + 1) % n]
             length = math.hypot(x2 - x1, y2 - y1)
             nx, ny = (y2 - y1) / length, -(x2 - x1) / length
             normals.append((nx, ny))
+            lengths.append(length)
             d, label = classify(nx, ny)
+            is_active = not outside(x1, x2) and (edge_active is None or edge_active((x1, y1), (x2, y2), (nx, ny)))
+            if not is_active:
+                d, label = 0.0, ""
+            active.append(is_active)
             dists.append(d)
             labels.append(label)
 
-        near_pt: list[tuple[float, float]] = [(0.0, 0.0)] * n
-        far_pt: list[tuple[float, float]] = [(0.0, 0.0)] * n
-        chains: list[list[tuple[float, float, float, str]]] = [[] for _ in range(n)]
-        mitre_points_list: list[list[tuple[tuple[float, float], str]]] = [[] for _ in range(n)]
-        for i in range(n):
-            v = coords[i]
-            n_in, d_in, lbl_in = normals[i - 1], dists[i - 1], labels[i - 1]
-            n_out, d_out, lbl_out = normals[i], dists[i], labels[i]
-            edge_in_dir = (-n_in[1], n_in[0])
-            edge_out_dir = (-n_out[1], n_out[0])
-            convex = edge_in_dir[0] * edge_out_dir[1] - edge_in_dir[1] * edge_out_dir[0] > 1e-9
+        # A sub-nm step - a riser between two parallel terraces, possibly made of a few sub-nm
+        # edges (an etch leaves the floor of an opening in terraces a few angstroms apart) - is
+        # not a facet: it rises with its terraces (translated along their normal by their
+        # distance, under their label), nucleates nothing and bounds nothing. Treated as a facet
+        # of whatever orientation it happens to have, with a rate just under its critical value it
+        # would widen at every step into a pit carried up through the whole crystal. A short edge
+        # that isn't such a riser (a crystal just emerging above its mask) is left as it is.
+        def terrace(i: int, step: int) -> int | None:
+            for k in range(1, 5):
+                j = (i + step * k) % n
+                if lengths[j] >= _MIN_NUCLEATION_EDGE:
+                    return j
+            return None
 
-            chain = [(n_in[0], n_in[1], d_in, lbl_in)]
-            if convex:
+        riser = [False] * n
+        for i in range(n):
+            if lengths[i] >= _MIN_NUCLEATION_EDGE or not active[i]:
+                continue
+            before, after = terrace(i, -1), terrace(i, 1)
+            if before is None or after is None:
+                continue
+            (bx, by), (ax, ay) = normals[before], normals[after]
+            if bx * ax + by * ay > _VICINAL_COS and active[before]:
+                riser[i] = True
+                nx, ny = normals[i]
+                dists[i] = dists[before] * max(0.0, nx * bx + ny * by)
+                labels[i] = labels[before]
+
+        # Each edge line's offset half-plane {p : n.p <= n.v + d}: the bound every piece near that
+        # edge must respect - including a rate-0 (pinned) line, which never moves.
+        offsets = [(normals[i][0], normals[i][1], normals[i][0] * coords[i][0] + normals[i][1] * coords[i][1] + dists[i]) for i in range(n)]
+        convex_at: list[bool] = []
+        # Convex, or concave by only a few degrees (an angstrom-deep dip in a facet): a bound found
+        # across such a corner still belongs to the same run of facets.
+        passable: list[bool] = []
+        for i in range(n):
+            n_in, n_out = normals[i - 1], normals[i]
+            turn = (-n_in[1]) * n_out[0] - n_in[0] * (-n_out[1])
+            convex_at.append(turn > 1e-9)
+            passable.append(turn > 1e-9 or (turn > -_VICINAL_SIN and n_in[0] * n_out[0] + n_in[1] * n_out[1] > 0))
+        # ... and either corner of a riser, which is part of its terraces' facet, not a break in it.
+        passable = [passable[i] or riser[i - 1] or riser[i] for i in range(n)]
+
+        chains: list[list[tuple[float, float, float, str]]] = []
+        for i in range(n):
+            n_in, n_out = normals[i - 1], normals[i]
+            chain = [(n_in[0], n_in[1], dists[i - 1], labels[i - 1])]
+            if convex_at[i] and active[i - 1] and active[i] and not (riser[i - 1] or riser[i]):
                 ang_in = math.atan2(n_in[1], n_in[0])
                 ang_out = math.atan2(n_out[1], n_out[0])
                 extras = sorted(
@@ -280,80 +424,99 @@ def _offset_named_facets(
                     key=lambda e: (e[4] - ang_in) % (2 * math.pi),
                 )
                 chain.extend((nx, ny, d, label) for nx, ny, d, label, _ang in extras)
-            chain.append((n_out[0], n_out[1], d_out, lbl_out))
+            chain.append((n_out[0], n_out[1], dists[i], labels[i]))
+            chains.append(chain)
+        nucleated = [
+            [(nx, ny, nx * coords[i][0] + ny * coords[i][1] + d) for nx, ny, d, _l in chains[i][1:-1]]
+            for i in range(n)
+        ]
 
+        def bounds_around(first_edge: int, last_edge: int) -> list[tuple[float, float, float]]:
+            """Offset half-planes of edges first_edge..last_edge plus up to two more each side,
+            walking outwards only across convex corners: within a convex run the grown shape is the
+            intersection of its facets' offset half-planes, so a piece must not cross any of them -
+            this is what makes two fans closing a narrow facet meet at one apex instead of
+            overshooting each other. Across a concave corner a neighbour's line is not a bound."""
+            own = {k % n for k in range(first_edge, last_edge + 1)}
+            idx = set(own)
+            corners = {k % n for k in range(first_edge, last_edge + 2)}
+            # Sub-nm edges (a step left by an etch, a sliver of tilt at a corner) don't count
+            # towards the two: the real facet just past one must still bound this piece.
+            k, counted = first_edge, 0
+            while counted < 2 and first_edge - k < n - 1 and passable[k % n]:
+                k -= 1
+                idx.add(k % n)
+                corners.add(k % n)
+                counted += lengths[k % n] >= _MIN_NUCLEATION_EDGE
+            k, counted = last_edge, 0
+            while counted < 2 and k - last_edge < n - 1 and passable[(k + 1) % n]:
+                k += 1
+                idx.add(k % n)
+                corners.add((k + 1) % n)
+                counted += lengths[k % n] >= _MIN_NUCLEATION_EDGE
+            # Only a real crystal facet bounds its neighbours (a rate-0 one included: its line is
+            # pinned). An off-axis edge - a curved mask wall, a sub-nm etch dip - or a non-seed edge
+            # has no growth front of its own to stop anything at.
+            # A facet nucleating at a corner of the run bounds it too, or the neighbouring edge's
+            # strip would poke past it and leave a sliver of edge for the next growth step to grow.
+            planes = [offsets[j] for j in idx if j in own or (active[j] and not riser[j] and is_facet(*normals[j]))]
+            return planes + [plane for c in corners for plane in nucleated[c]]
+
+        def clipped(points: list[tuple[float, float]], planes: list[tuple[float, float, float]]) -> BaseGeometry:
+            # Sutherland-Hodgman against each half-plane, with a hair of slack so a piece lying
+            # exactly on a bound isn't shaved to nothing by rounding.
+            for a, b, h in planes:
+                if len(points) < 3:
+                    return Polygon()
+                out = []
+                for p, q in zip(points, points[1:] + points[:1]):
+                    fp, fq = a * p[0] + b * p[1] - h - 1e-9, a * q[0] + b * q[1] - h - 1e-9
+                    if fp <= 0:
+                        out.append(p)
+                    if (fp < 0 < fq) or (fq < 0 < fp):
+                        s = fp / (fp - fq)
+                        out.append((p[0] + s * (q[0] - p[0]), p[1] + s * (q[1] - p[1])))
+                points = out
+            # Every piece is a triangle or rectangle clipped by half-planes - convex, hence valid.
+            return Polygon(points) if len(points) >= 3 else Polygon()
+
+        for i in range(n):
+            v = coords[i]
+            n_in, d_in, lbl_in = normals[i - 1], dists[i - 1], labels[i - 1]
+            n_out, d_out, lbl_out = normals[i], dists[i], labels[i]
+            if (d_in <= 0 and d_out <= 0 and len(chains[i]) == 2) or outside(v[0]):
+                continue
+            p_in = (v[0] + n_in[0] * d_in, v[1] + n_in[1] * d_in)
+            p_out = (v[0] + n_out[0] * d_out, v[1] + n_out[1] * d_out)
+
+            chain = chains[i]
             mitre_points = [
                 tagged
                 for (nx1, ny1, d1, l1), (nx2, ny2, d2, l2) in zip(chain, chain[1:])
                 for tagged in mitre_or_bevel(v, (nx1, ny1), d1, l1, (nx2, ny2), d2, l2)
             ]
-            chains[i] = chain
-            mitre_points_list[i] = mitre_points
-            near_pt[i] = mitre_points[0][0]
-            far_pt[i] = mitre_points[-1][0]
-
-        # Two fans pivoted from opposite ends of the same shared edge, entirely independently (see
-        # this function's docstring), can each overshoot past the *other* corner instead of meeting
-        # partway along that edge - most visibly a still-growing c-plane top narrow enough that both
-        # flanking semi-polar facets' mitre points land beyond one another, which would otherwise
-        # hand the strip-emission loop below a self-folded (bowtie) quad and produce a double-tipped
-        # apex once `buffer(0)` splits it. Detect that crossing along the shared edge's own direction
-        # and, where it happens, collapse the edge: replace both corners' points with the direct
-        # intersection of their next-to-outermost lines (skipping the collapsed edge's own line
-        # entirely), so the two flanking fans meet at one point instead of folding past each other -
-        # the strip-emission loop below then draws that edge as the triangle from its two original
-        # endpoints up to this shared point, rather than the (now degenerate) quad it uses elsewhere.
-        collapsed = [False] * n
-        for i in range(n):
-            if dists[i] <= 0:
-                continue
-            j = (i + 1) % n
-            v_i, v_j = coords[i], coords[j]
-            edge_len = math.hypot(v_j[0] - v_i[0], v_j[1] - v_i[1])
-            if edge_len < 1e-9:
-                continue
-            e_dir = ((v_j[0] - v_i[0]) / edge_len, (v_j[1] - v_i[1]) / edge_len)
-            far_p = mitre_points_list[i][-1][0]
-            near_p = mitre_points_list[j][0][0]
-            t_far = (far_p[0] - v_i[0]) * e_dir[0] + (far_p[1] - v_i[1]) * e_dir[1]
-            t_near = (near_p[0] - v_i[0]) * e_dir[0] + (near_p[1] - v_i[1]) * e_dir[1]
-            if t_far <= t_near + 1e-9:
-                continue
-            nx1, ny1, d1, _lbl1 = chains[i][-2]
-            nx2, ny2, d2, _lbl2 = chains[j][1]
-            p1 = (v_i[0] + nx1 * d1, v_i[1] + ny1 * d1)
-            dir1 = (-ny1, nx1)
-            p2 = (v_j[0] + nx2 * d2, v_j[1] + ny2 * d2)
-            dir2 = (-ny2, nx2)
-            det = dir1[0] * dir2[1] - dir1[1] * dir2[0]
-            if abs(det) < 1e-9:
-                continue
-            t = ((p2[0] - p1[0]) * dir2[1] - (p2[1] - p1[1]) * dir2[0]) / det
-            x_point = (p1[0] + dir1[0] * t, p1[1] + dir1[1] * t)
-            far_label = mitre_points_list[i][-1][1]
-            near_label = mitre_points_list[j][0][1]
-            mitre_points_list[i][-1] = (x_point, far_label)
-            mitre_points_list[j][0] = (x_point, near_label)
-            far_pt[i] = x_point
-            near_pt[j] = x_point
-            collapsed[i] = True
-
-        for i in range(n):
-            v = coords[i]
-            mitre_points = mitre_points_list[i]
-            for (p_a, label_a), (p_b, _label_b) in zip(mitre_points, mitre_points[1:]):
-                add_piece(label_a, Polygon([v, p_a, p_b]).buffer(0))
+            if not convex_at[i] and len(mitre_points) != 1:
+                continue  # concave corner whose mitre lands too far out: the two edge strips suffice
+            planes = bounds_around(i - 1, i)
+            fan = [(p_in, lbl_in), *mitre_points, (p_out, lbl_out)]
+            for (p_a, label_a), (p_b, _label_b) in zip(fan, fan[1:]):
+                piece = clipped([v, p_a, p_b], planes)
+                if not piece.is_empty and piece.area > 1e-12:
+                    add_piece(label_a, piece)
 
         for i in range(n):
             if dists[i] <= 0:
                 continue
             v_i, v_next = coords[i], coords[(i + 1) % n]
-            if collapsed[i]:
-                add_piece(labels[i], Polygon([v_i, v_next, far_pt[i]]).buffer(0))
-            else:
-                add_piece(labels[i], Polygon([v_i, v_next, near_pt[(i + 1) % n], far_pt[i]]).buffer(0))
+            nx, ny = normals[i]
+            strip = [v_i, v_next, (v_next[0] + nx * dists[i], v_next[1] + ny * dists[i]), (v_i[0] + nx * dists[i], v_i[1] + ny * dists[i])]
+            if outside(v_i[0], v_next[0]):
+                continue
+            piece = clipped(strip, bounds_around(i, i))
+            if not piece.is_empty and piece.area > 1e-12:
+                add_piece(labels[i], piece)
 
-    return {label: _clean(unary_union(pcs)) for label, pcs in pieces_by_family.items()}
+    return {label: _clean(_robust_union(pcs)) for label, pcs in pieces_by_family.items()}
 
 
 def beam_vector(angle_deg: float, length: float) -> tuple[float, float]:
@@ -498,7 +661,14 @@ class Geometry:
         polys = [l.polygon for l in self.layers if not l.polygon.is_empty]
         if not polys:
             return Polygon()
-        merged = _merge_touching(_clean(unary_union(polys)))
+        # Closing by `_SEAM_EPS`, not just merging parts that touch: two layers (or two substeps of
+        # one growth) whose shared boundary disagrees in the last few bits leave a zero-width slit
+        # *between* them, which every growth step reading this shape back would otherwise treat as
+        # a real crevice in the surface - and grow spikes out of.
+        merged = _clean(unary_union(polys))
+        mitre = {"join_style": "mitre"}
+        with np.errstate(divide="ignore", invalid="ignore"):  # GEOS mitre on a degenerate segment - harmless
+            merged = _clean(merged.buffer(_SEAM_EPS, **mitre).buffer(-_SEAM_EPS, **mitre))
         return _fill_holes(merged) if _has_interior(merged) else merged
 
     def bounds(self) -> tuple[float, float, float, float]:
@@ -530,6 +700,88 @@ class Geometry:
         across both vertical domain edges (see the class docstring's simplifications).
         """
         return self._mirror_pad(self._bulk_pad(geom))
+
+    def _reflect_into_domain(self, x: float) -> float:
+        """Map an x from the mirror-padded copies (see `_mirror_pad`) back into [0, domain_width]."""
+        w = self.domain_width_nm
+        x = math.fmod(abs(x), 2 * w)
+        return 2 * w - x if x > w else x
+
+    def _material_at(self, x: float, y: float) -> str | None:
+        """The material of the layer at (x, y), allowing for the mirror/bulk padding of `_pad`;
+        falls back to the nearest layer (a probe can land a hair outside a simplified layer)."""
+        if self.floor_nm is not None and y < self.floor_nm:
+            return self.layers[0].material if self.layers else None
+
+        probe = Point(self._reflect_into_domain(x), y)
+        live = [l for l in self.layers if not l.polygon.is_empty]
+        if not live:
+            return None
+        for layer in reversed(live):
+            if layer.polygon.contains(probe):
+                return layer.material
+        return min(live, key=lambda l: l.polygon.distance(probe)).material
+
+    def _split_at_layer_boundaries(self, padded: BaseGeometry, margin: float = math.inf) -> BaseGeometry:
+        """`padded` (from `_pad(self.solid())`) with every layer vertex lying on one of its exterior
+        edges inserted into that edge, so each edge of the result is made of a single material -
+        `solid()` merges collinear edges of neighbouring layers (an InGaN cap's side flush with the
+        GaN sidewall beneath it) into one. Edges further than `margin` outside the domain are left
+        whole."""
+        w = self.domain_width_nm
+        pts = []
+        for layer in self.layers:
+            for ring in layer.rings():
+                for coords in [ring["exterior"], *ring["holes"]]:
+                    pts.extend(coords)
+        if not pts:
+            return padded
+        v = np.array(pts, dtype=float)
+        v = np.vstack([v, np.column_stack([-v[:, 0], v[:, 1]]), np.column_stack([2 * w - v[:, 0], v[:, 1]])])
+
+        def split_ring(coords: list[tuple[float, float]]) -> list[tuple[float, float]]:
+            out: list[tuple[float, float]] = []
+            for (x1, y1), (x2, y2) in zip(coords, coords[1:]):
+                out.append((x1, y1))
+                if max(x1, x2) < -margin or min(x1, x2) > w + margin:
+                    continue
+                dx, dy = x2 - x1, y2 - y1
+                length2 = dx * dx + dy * dy
+                if length2 < 1e-12:
+                    continue
+                t = ((v[:, 0] - x1) * dx + (v[:, 1] - y1) * dy) / length2
+                px, py = x1 + t * dx, y1 + t * dy
+                dist = np.hypot(v[:, 0] - px, v[:, 1] - py)
+                t_margin = _SPLIT_TOL / math.sqrt(length2)
+                hit = (dist < _SPLIT_TOL) & (t > t_margin) & (t < 1 - t_margin)
+                if hit.any():
+                    for tt in np.unique(np.round(t[hit], 9)):
+                        out.append((x1 + tt * dx, y1 + tt * dy))
+            out.append(coords[-1])
+            return out
+
+        parts = list(padded.geoms) if isinstance(padded, MultiPolygon) else [padded]
+        split = [
+            Polygon(split_ring(list(p.exterior.coords)), [list(r.coords) for r in p.interiors])
+            for p in parts
+            if not p.is_empty
+        ]
+        return split[0] if len(split) == 1 else MultiPolygon(split)
+
+    def _seed_edge_filter(
+        self, seed_materials: list[str]
+    ) -> Callable[[tuple[float, float], tuple[float, float], tuple[float, float]], bool]:
+        """An `_offset_named_facets` `edge_active` predicate: an edge grows only if the material
+        just inside its midpoint is a seed (see `seed_matches`). Edges belong to the exposed
+        surface by construction, so a mask covering a seed hides it with no extra bookkeeping."""
+
+        def active(p1: tuple[float, float], p2: tuple[float, float], normal: tuple[float, float]) -> bool:
+            mx = (p1[0] + p2[0]) / 2 - normal[0] * _SEED_PROBE_DEPTH
+            my = (p1[1] + p2[1]) / 2 - normal[1] * _SEED_PROBE_DEPTH
+            material = self._material_at(mx, my)
+            return material is not None and seed_matches(material, seed_materials)
+
+        return active
 
     def _clamp_floor(self, y: float) -> float:
         return y if self.floor_nm is None else max(y, self.floor_nm)
@@ -653,9 +905,11 @@ class Geometry:
                     both left-tilted and right-tilted from the seed surface, mimicking symmetric
                     facet growth on a mesa or V-groove.
 
-        If `seed_materials` is non-empty the film nucleates *only* where one of those materials
-        is the topmost exposed surface (every non-seed layer covering the seed blocks growth
-        there — SAG selectivity).  Pass an empty list / None to grow on all exposed surfaces.
+        If `seed_materials` is non-empty the film nucleates *only* on exposed surfaces made of one
+        of those materials (SAG selectivity) - a mask or a non-seed cap is just not a growth
+        surface. An alloy family name matches every composition of it (`"InGaN"` matches
+        `In0.10Ga0.90N`, see `seed_matches`). Pass an empty list / None to grow on all exposed
+        surfaces.
 
         `provenance`, if given, is attached to the resulting `Layer` as-is (see
         `LayerProvenance`) — purely descriptive, this method never reads it back.
@@ -668,61 +922,52 @@ class Geometry:
 
         y_min, y_max = solid.bounds[1], solid.bounds[3]
 
-        # --- resolve growth origin (with or without SAG selectivity) ---
-        if seed_materials:
-            seed_polys = [l.polygon for l in self.layers if l.material in seed_materials and not l.polygon.is_empty]
-            if not seed_polys:
-                return
-            seed_union = _clean(unary_union(seed_polys))
-            non_seed_polys = [l.polygon for l in self.layers if l.material not in seed_materials and not l.polygon.is_empty]
-            if non_seed_polys:
-                # A non-seed layer blocks the seed underneath its full x-footprint even though
-                # it sits above the seed in y and doesn't geometrically overlap it. Project each
-                # non-seed polygon downward (toward -∞) so the difference correctly removes the
-                # seed region hidden under a mask.
-                shadows = []
-                for p in non_seed_polys:
-                    parts = list(p.geoms) if isinstance(p, MultiPolygon) else [p]
-                    for part in parts:
-                        minx, miny, maxx, _ = part.bounds
-                        shadows.append(box(minx, miny - _GUARD_MARGIN, maxx, miny))
-                blocking = _clean(unary_union(non_seed_polys + shadows))
-                exposed_seed = _clean(seed_union.difference(blocking))
-            else:
-                exposed_seed = seed_union
-            if exposed_seed.is_empty:
-                return
-            growth_base = exposed_seed
-        else:
-            growth_base = solid
-
-        # SAG: never bulk-pad the seed — the floor extension would span the full domain width
-        # and cause growth to appear everywhere.  Only pad for non-selective blanket growth.
-        padded = growth_base if seed_materials else self._pad(growth_base)
-
-        # --- sweep the growth base along the growth direction ---
+        # --- growth direction(s) ---
         if orientation == "c_plane":
-            film_raw = sweep_union(padded, (0.0, thickness_nm))
+            vectors = [(0.0, thickness_nm)]
         elif orientation == "m_plane":
             # Symmetric lateral expansion on both sidewalls
-            film_raw = _clean(unary_union([
-                sweep_union(padded, (thickness_nm, 0.0)),
-                sweep_union(padded, (-thickness_nm, 0.0)),
-            ]))
+            vectors = [(thickness_nm, 0.0), (-thickness_nm, 0.0)]
         elif orientation == "semi_polar":
             # Symmetric tilted facets: ±x tilt from vertical by angle_deg
             rad = math.radians(angle_deg)
-            dx = thickness_nm * math.sin(rad)
-            dy = thickness_nm * math.cos(rad)
-            film_raw = _clean(unary_union([
-                sweep_union(padded, (dx, dy)),
-                sweep_union(padded, (-dx, dy)),
-            ]))
+            vectors = [(thickness_nm * math.sin(rad), thickness_nm * math.cos(rad)), (-thickness_nm * math.sin(rad), thickness_nm * math.cos(rad))]
         else:  # pragma: no cover
             raise ValueError(f"unknown epitaxial orientation {orientation!r}")
 
+        padded = self._pad(solid)
+        if seed_materials:
+            # SAG: sweep only the exposed edges made of a seed material (see `_seed_edge_filter`) -
+            # a mask, or a non-seed cap, simply isn't a growth surface, with no need to guess what
+            # it shadows; the domain edges stay symmetry boundaries as for blanket growth.
+            if not any(seed_matches(l.material, seed_materials) for l in self.layers if not l.polygon.is_empty):
+                return
+            margin = thickness_nm + 1.0
+            padded = self._split_at_layer_boundaries(padded, margin=margin)
+            edge_active = self._seed_edge_filter(seed_materials)
+            quads = []
+            for part in (padded.geoms if isinstance(padded, MultiPolygon) else [padded]):
+                coords = list(orient(part, sign=1.0).exterior.coords)
+                for (x1, y1), (x2, y2) in zip(coords, coords[1:]):
+                    if max(x1, x2) < -margin or min(x1, x2) > self.domain_width_nm + margin:
+                        continue
+                    length = math.hypot(x2 - x1, y2 - y1)
+                    if length < 1e-12:
+                        continue
+                    normal = ((y2 - y1) / length, -(x2 - x1) / length)
+                    facing = [(vx, vy) for vx, vy in vectors if vx * normal[0] + vy * normal[1] > 1e-9]
+                    if not facing or not edge_active((x1, y1), (x2, y2), normal):
+                        continue
+                    for vx, vy in facing:
+                        quads.append(Polygon([(x1, y1), (x2, y2), (x2 + vx, y2 + vy), (x1 + vx, y1 + vy)]))
+            if not quads:
+                return
+            film_raw = _clean(_robust_union(quads))
+        else:
+            film_raw = _clean(unary_union([sweep_union(padded, v) for v in vectors]))
+
         film = self._crop(_clean(film_raw.difference(padded)), y_min - thickness_nm, y_max + thickness_nm)
-        film = _drop_tiny(_clean(film.difference(solid)))
+        film = _drop_tiny(_close_seams(_clean(film.difference(solid)), solid))
 
         if not film.is_empty:
             self.layers.append(Layer(material=material, polygon=film, provenance=provenance))
@@ -740,6 +985,7 @@ class Geometry:
         material_m: str | None = None,
         material_sp: str | None = None,
         provenance: LayerProvenance | None = None,
+        max_substep_nm: float = 10.0,
     ) -> None:
         """Faceted growth: add `material` by advancing three crystal-plane families - c-plane
         {0001} (`rate_c`), m-plane {10-10} sidewalls (`rate_m`), and semi-polar facets at
@@ -768,7 +1014,10 @@ class Geometry:
         positive rate_sp on its own.
 
         Repeatedly applying thin layers (small `thickness_nm`) produces conformal MQW stacks that
-        faithfully follow the pencil/pyramid shape as it develops.
+        faithfully follow the pencil/pyramid shape as it develops. A thick layer is grown the same
+        way internally - in substeps of at most `max_substep_nm` of advance for the fastest facet -
+        so facets can appear and vanish along the way (a crystal filling a mask opening, then
+        overflowing it), and still lands as a single Layer per material.
 
         `material_c`/`material_m`/`material_sp` let each facet family incorporate a *different*
         material - typically the same alloy at a different composition, e.g. more indium on the
@@ -787,42 +1036,79 @@ class Geometry:
         `LayerProvenance`) - including each per-family split, when `material_c`/`material_m`/
         `material_sp` produce more than one. This method never reads it back.
         """
-        if thickness_nm <= 0 or not self.layers:
+        max_rate = max(rate_c, rate_m, rate_sp)
+        if thickness_nm <= 0 or max_rate <= 0 or not self.layers:
             return
+        if seed_materials and not any(
+            seed_matches(l.material, seed_materials) for l in self.layers if not l.polygon.is_empty
+        ):
+            return
+        solid_before = self.solid()
+        if solid_before.is_empty:
+            return
+
+        # A single offset is only exact while no facet vanishes or appears mid-growth: grown in one
+        # shot, a crystal filling a mask opening could never overflow it and facet, and a c-plane top
+        # consumed by its flanking facets folds over itself. Substeps no larger than
+        # `max_substep_nm` of advance let each topology change happen between two offsets. Each
+        # substep's film is tagged so the next one keeps growing on it whatever `seed_materials`
+        # says, then the substeps are merged back into one Layer per material.
+        families = {"c": material_c or material, "m": material_m or material, "sp": material_sp or material}
+        tags = {m: f"<growing>{m}" for m in set(families.values())}
+        seeds = [*seed_materials, *tags.values()] if seed_materials else None
+        n = max(1, math.ceil(max_rate * thickness_nm / max_substep_nm))
+        start = len(self.layers)
+        for _ in range(n):
+            self._deposit_faceted_once(
+                thickness_nm / n, rate_c, rate_m, rate_sp, semi_polar_angle_deg, seeds,
+                {family: tags[m] for family, m in families.items()},
+            )
+        grown = self.layers[start:]
+        del self.layers[start:]
+        for layer_material, tag in tags.items():
+            polys = [l.polygon for l in grown if l.material == tag]
+            if not polys:
+                continue
+            film = _fill_holes(_clean(unary_union(polys)))
+            film = _drop_tiny(_close_seams(_clean(film.difference(solid_before)), solid_before))
+            if not film.is_empty:
+                self.layers.append(Layer(material=layer_material, polygon=film, provenance=provenance))
+
+    def _deposit_faceted_once(
+        self,
+        t: float,
+        rate_c: float,
+        rate_m: float,
+        rate_sp: float,
+        semi_polar_angle_deg: float,
+        seed_materials: list[str] | None,
+        materials_by_family: dict[str, str],
+    ) -> None:
+        """One single-offset substep of `deposit_faceted`, appending one Layer per material in
+        `materials_by_family` (keyed "c"/"m"/"sp")."""
         solid = self.solid()
         if solid.is_empty:
             return
-
         y_min, y_max = solid.bounds[1], solid.bounds[3]
-        t = thickness_nm
         theta = math.radians(semi_polar_angle_deg)
+        material = materials_by_family["c"]
 
         # --- SAG selectivity -----------------------------------------------
+        # Always grow from the whole (padded) solid, so the domain edges stay symmetry boundaries;
+        # SAG only decides which of its exposed edges are allowed to move - an edge made of a
+        # non-seed material (a mask, a cap) is pinned like a rate-0 facet.
+        reach = t * max(rate_c, rate_m, rate_sp) * 4 + 1.0
+        real = self._pad(solid)
+        # The growth front, trimmed of sub-angstrom bumps (see `_offset_named_facets` for the
+        # steps between terraces). Trim-only - intersected with the solid - so it never sits above
+        # the real surface: the film still starts exactly on it, see the difference below.
+        padded = _clean(real.intersection(real.simplify(_FRONT_SMOOTH, preserve_topology=True)))
+        edge_active = None
         if seed_materials:
-            seed_polys = [l.polygon for l in self.layers if l.material in seed_materials and not l.polygon.is_empty]
-            if not seed_polys:
+            if not any(seed_matches(l.material, seed_materials) for l in self.layers if not l.polygon.is_empty):
                 return
-            seed_union = _clean(unary_union(seed_polys))
-            non_seed_polys = [l.polygon for l in self.layers if l.material not in seed_materials and not l.polygon.is_empty]
-            if non_seed_polys:
-                shadows = []
-                for p in non_seed_polys:
-                    parts = list(p.geoms) if isinstance(p, MultiPolygon) else [p]
-                    for part in parts:
-                        minx, miny, maxx, _ = part.bounds
-                        shadows.append(box(minx, miny - _GUARD_MARGIN, maxx, miny))
-                blocking = _clean(unary_union(non_seed_polys + shadows))
-                exposed_seed = _clean(seed_union.difference(blocking))
-            else:
-                exposed_seed = seed_union
-            if exposed_seed.is_empty:
-                return
-            growth_base = exposed_seed
-        else:
-            growth_base = solid
-
-        # SAG: never bulk-pad the seed (same reason as deposit_epitaxial).
-        padded = growth_base if seed_materials else self._pad(growth_base)
+            padded = self._split_at_layer_boundaries(padded, margin=reach)
+            edge_active = self._seed_edge_filter(seed_materials)
 
         named_directions = [
             (0.0, 1.0, rate_c * t, "c"),
@@ -831,10 +1117,11 @@ class Geometry:
             (math.sin(theta), math.cos(theta), rate_sp * t, "sp"),
             (-math.sin(theta), math.cos(theta), rate_sp * t, "sp"),
         ]
-        pieces_by_family = _offset_named_facets(padded, named_directions)
+        pieces_by_family = _offset_named_facets(
+            padded, named_directions, edge_active, x_window=(-reach, self.domain_width_nm + reach)
+        )
         max_reach = t * (rate_c + rate_m + rate_sp) / max(math.cos(theta), 0.05) + 1.0
 
-        materials_by_family = {"c": material_c or material, "m": material_m or material, "sp": material_sp or material}
         pieces_by_material: dict[str, list[BaseGeometry]] = {}
         if len(set(materials_by_family.values())) == 1:
             # No per-facet override (the common case): keep the single-Layer behaviour exactly
@@ -847,18 +1134,22 @@ class Geometry:
                         pieces_by_family[family]
                     )
 
+        # Neighbouring families' pieces overlap where an edge strip meets a corner fan: whatever an
+        # earlier family (c, then m, then sp) already claimed isn't handed out a second time.
+        claimed = solid
         for layer_material, new_areas in pieces_by_material.items():
             new_area = unary_union(new_areas)
             grown = _clean(unary_union([solid, new_area]))
             film = self._crop(
-                _clean(grown.difference(padded)),
+                _clean(grown.difference(real)),
                 y_min - t,
                 y_max + max_reach,
             )
-            film = _merge_touching(_clean(film.difference(solid)))
-            film = _fill_holes(_drop_tiny(film))
+            film = _fill_holes(_close_seams(_clean(film.difference(solid)), solid))
+            film = _drop_tiny(_clean(film.difference(claimed)))
             if not film.is_empty:
-                self.layers.append(Layer(material=layer_material, polygon=film, provenance=provenance))
+                self.layers.append(Layer(material=layer_material, polygon=film))
+                claimed = unary_union([claimed, film])
 
     def fill_facet_envelope(
         self,
@@ -898,7 +1189,7 @@ class Geometry:
         y_min, y_max = solid.bounds[1], solid.bounds[3]
 
         seeds = seed_materials or [material]
-        seed_polys = [l.polygon for l in self.layers if l.material in seeds and not l.polygon.is_empty]
+        seed_polys = [l.polygon for l in self.layers if seed_matches(l.material, seeds) and not l.polygon.is_empty]
         if not seed_polys:
             return
         # Air starts exactly at y_min so the wafer's backside never counts as exposed; the domain's
@@ -1042,6 +1333,15 @@ class Geometry:
             for layer in self.layers:
                 if not layer.polygon.is_empty:
                     layer.polygon = _drop_tiny(_clean(layer.polygon.intersection(new_solid)))
+
+        # The last substep can stop a hair short of a layer's far side, leaving a sub-angstrom film
+        # (e.g. on the floor of a mask opening) that a real over-etch would clear - and that would
+        # otherwise read as a mask covering the seed. Morphological opening removes only such films.
+        for layer in self.layers:
+            if layer.polygon.is_empty or recipe.factor_for(materials.get(layer.material)) <= 0:
+                continue
+            opened = layer.polygon.buffer(-_RESIDUE_NM, join_style="mitre").buffer(_RESIDUE_NM, join_style="mitre")
+            layer.polygon = _drop_tiny(_clean(layer.polygon.intersection(opened)))
 
     def planarize(self, target_level_nm: float | None = None, stop_material: str | None = None) -> None:
         """Cut the stack flat at `target_level_nm`, or - given `stop_material` instead - at the

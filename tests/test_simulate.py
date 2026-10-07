@@ -172,3 +172,52 @@ def test_frame_to_dict_serializes_provenance_and_omits_it_when_absent(materials,
     # not a crash - Layer.provenance stays optional everywhere it isn't explicitly wired up.
     deposited_layer_dict = frames[-1].to_dict()["layers"][-1]
     assert deposited_layer_dict["provenance"] is None
+
+
+def _slit_edges(polygon):
+    """Edges a polygon's rings traverse in both directions - a zero-width slit or flap, drawn as a
+    stray line across the layer."""
+    from shapely.geometry import MultiPolygon
+
+    parts = list(polygon.geoms) if isinstance(polygon, MultiPolygon) else [polygon]
+    found = []
+    for part in parts:
+        segments = set()
+        for ring in [part.exterior, *part.interiors]:
+            coords = [(round(x, 4), round(y, 4)) for x, y in ring.coords]
+            segments |= {(a, b) for a, b in zip(coords, coords[1:]) if a != b}
+        found += [(a, b) for a, b in segments if (b, a) in segments]
+    return found
+
+
+def test_mqw_barriers_on_a_sag_nanowire_have_no_internal_seams(recipes):
+    """A real SAG flow (isotropic undercut of the oxide, nucleation overflowing the mask, wide
+    faceted core, then wells/barriers): each barrier is assembled from many strips, fans and
+    substeps over a surface shaped by the etch, which used to leave zero-width flaps along the
+    well/barrier interfaces - drawn as lines across the layers."""
+    from structureforge.core.materials import default_library
+
+    materials = default_library().with_materials(indium_gan(0.10))
+
+    def faceted(material, thickness, c, m, sp, seeds):
+        return FacetedGrowth(
+            name="F", material=material, thickness=Length.nm(thickness), rate_c=c, rate_m=m, rate_sp=sp,
+            semi_polar_angle_deg=45, seed_materials=seeds,
+        )
+
+    steps = [
+        Deposition(name="Oxyde", material="SiO2", recipe="ALD Conformal", thickness=Length.nm(50)),
+        Deposition(name="Nitrure", material="Si3N4", recipe="ALD Conformal", thickness=Length.nm(80)),
+        Lithography(name="Litho", resist_material="Photoresist", thickness=Length.nm(100), openings=[(200, 300)]),
+        Etch(name="Gravure", recipe="Anisotropic RIE", depth=Length.nm(83)),
+        Etch(name="Gravure SiO2", recipe="Wet HF Dip", depth=Length.nm(51)),
+        ResistStrip(name="Strip", material="Photoresist"),
+        faceted("GaN", 400, 1, 0.3, 0.7, ["GaN"]),
+        faceted("GaN", 600, 1, 0.05, 0.8, ["GaN"]),
+    ]
+    for _ in range(4):
+        steps += [faceted("In0.10Ga0.90N", 10, 1, 0, 0, ["GaN"]), faceted("GaN", 10, 1, 0, 0.5, ["GaN", "InGaN"])]
+
+    final = simulate(Geometry.substrate("GaN", domain_width_nm=500, thickness_nm=50), steps, materials, recipes)[-1]
+    for layer in final.layers:
+        assert _slit_edges(layer.polygon) == [], layer.material
