@@ -165,6 +165,7 @@ _SEED_PROBE_DEPTH = 0.25  # nm - how far inside an exposed edge to look for the 
 _RESIDUE_NM = 0.1  # nm - etched layers thinner than twice this are leftover residue, see Geometry.etch
 _FRONT_SMOOTH = 0.2  # nm - bumps below this are trimmed off a growth front, see Geometry._deposit_faceted_once
 _MIN_NUCLEATION_EDGE = 1.0  # nm - a shorter edge between two parallel ones is a step, not a facet, see _offset_named_facets
+_MIN_SP_INV_FRACTION = 0.02  # slowest nonzero rate_sp_inv, relative to the fastest rate, see Geometry.deposit_faceted
 _VICINAL_COS = math.cos(math.radians(10.0))
 _VICINAL_SIN = math.sin(math.radians(10.0))  # an edge within 10 deg of a facet grows like it, see _offset_named_facets
 _UNION_GRID = 1e-4  # nm - snap grid for _robust_union's fallback
@@ -1171,7 +1172,9 @@ class Geometry:
 
         `rate_sp_inv` adds a fourth family, the inverted semi-polar facets ({10-1-1}: same angle
         from the c-axis as the SP ones, facing down and out), with `material_sp_inv` as its
-        override. At 0 (the default) nothing changes. Above 0, a crystal whose sidewalls don't grow
+        override. At 0 (the default) nothing changes; a nonzero rate must be at least 2% of the
+        fastest one (ValueError otherwise - slower, its advance per substep is below the engine's
+        resolution). Above 0, a crystal whose sidewalls don't grow
         (rate_m = 0, or not a seed material) is no longer held inside their lines: it spreads past
         them with an inverted facet as its underside, whose foot slides down the bare sidewall as
         it advances - a shell nucleating on a nanowire's tip and creeping down it, with no m-plane
@@ -1186,6 +1189,15 @@ class Geometry:
         `material_sp`/`material_sp_inv` produce more than one. This method never reads it back.
         """
         max_rate = max(rate_c, rate_m, rate_sp, rate_sp_inv)
+        if 0 < rate_sp_inv < _MIN_SP_INV_FRACTION * max_rate:
+            # Substeps advance the fastest facet by up to `max_substep_nm`: slower than this, the
+            # inverted facet moves a fraction of a nm per substep, and the sliver it adds at its
+            # foot falls under the film's own noise filters - dropped on one side but not the
+            # other, the overhang loses its symmetry and breaks into a staircase.
+            raise ValueError(
+                f"rate_sp_inv must be 0 or at least {_MIN_SP_INV_FRACTION:g} x the fastest rate "
+                f"({_MIN_SP_INV_FRACTION * max_rate:.3g} here), got {rate_sp_inv:g}"
+            )
         if thickness_nm <= 0 or max_rate <= 0 or not self.layers:
             return
         if seed_materials and not any(

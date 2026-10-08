@@ -155,7 +155,8 @@ plus an optional fourth, off by default:
     seed material) instead of being held inside them: an inverted facet forms under the
     overhang and its foot slides down the bare sidewall - a shell nucleating on a nanowire's tip
     and creeping down it, ending as a hexagon (c-plane top, SP facets, inverted SP facets) around
-    the tip. Its foot drops by rate_sp_inv * thickness / cos(semi_polar_angle_deg).
+    the tip. Its foot drops by rate_sp_inv * thickness / cos(semi_polar_angle_deg). A nonzero
+    rate_sp_inv must be at least 2% of the fastest rate (the simulation fails otherwise).
 
     `material_c`/`material_m`/`material_sp`/`material_sp_inv` let each facet family incorporate a
     different material - typically the same alloy at a different composition, matching real facet-

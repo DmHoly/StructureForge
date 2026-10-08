@@ -715,3 +715,34 @@ def test_faceted_growth_inverted_facets_overhang_a_non_seed_sidewall():
     vertex_y = 600 - 25 * (1 - s) / s
     assert Point(75.0, vertex_y).distance(film) < 0.01
     assert not film.contains(Point(80.0, vertex_y - 15))  # air under the overhang
+
+
+def test_faceted_growth_inverted_facets_widen_a_core_as_it_grows():
+    """A core whose top outgrows its static sidewalls (rate_sp above 2 * rate_c * cos(theta) +
+    rate_sp_inv: no SP facet left, the c-plane meets the inverted facet directly) widens as it
+    rises: its flanks are the inverted facets, 90 - theta from vertical, straight and mirror-
+    symmetric, from a foot that has slid rate_sp_inv * t / cos(theta) down the old sidewall to the
+    corner of the c-plane top."""
+    from shapely.affinity import scale
+
+    theta = math.radians(84)
+    g = Geometry(domain_width_nm=800)
+    g.layers.append(Layer(material="GaN", polygon=box(350, 0, 450, 400)))
+    g.deposit_faceted("GaN", 300, rate_c=1, rate_m=0, rate_sp=0.25, rate_sp_inv=0.02, semi_polar_angle_deg=84)
+
+    film = g.layers[-1].polygon
+    assert film.geom_type == "Polygon" and len(film.exterior.coords) - 1 == 6
+    assert film.bounds[1] == pytest.approx(400 - 0.02 * 300 / math.cos(theta), abs=0.01)
+    assert film.bounds[0] == pytest.approx(350 - (0.02 * 300 + 300 * math.cos(theta)) / math.sin(theta), abs=0.01)
+    assert film.bounds[3] == pytest.approx(700, abs=0.01)
+    solid = g.solid()
+    assert solid.symmetric_difference(scale(solid, xfact=-1, origin=(400, 0))).area < 1e-3
+
+
+def test_faceted_growth_rejects_an_inverted_rate_below_the_engine_resolution():
+    """At 1% of the fastest rate the inverted facet advances 0.1 nm per substep - under the film's
+    noise filters, it used to lose its symmetry; anything under 2% is refused."""
+    g = Geometry(domain_width_nm=800)
+    g.layers.append(Layer(material="GaN", polygon=box(350, 0, 450, 400)))
+    with pytest.raises(ValueError, match="rate_sp_inv"):
+        g.deposit_faceted("GaN", 300, rate_c=1, rate_m=0, rate_sp=0.25, rate_sp_inv=0.01, semi_polar_angle_deg=84)
