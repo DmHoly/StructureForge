@@ -118,7 +118,7 @@ def _drop_tiny(geom: BaseGeometry) -> BaseGeometry:
     return geom if _is_real(geom) else Polygon()
 
 
-def _fill_holes(geom: BaseGeometry, max_area: float = _SPURIOUS_HOLE_AREA) -> BaseGeometry:
+def _fill_holes(geom: BaseGeometry, max_area: float = _SPURIOUS_HOLE_AREA, occupied: BaseGeometry | None = None) -> BaseGeometry:
     """Drop every interior ring of `geom` smaller than `max_area`.
 
     `_offset_named_facets` mitres/bevels each vertex of a facet chain independently: when the
@@ -137,12 +137,19 @@ def _fill_holes(geom: BaseGeometry, max_area: float = _SPURIOUS_HOLE_AREA) -> Ba
     overflowing its mask and sealing the undercut beneath it, two fronts coalescing over a
     trench). That one is kept - as air the growth goes on filling from its walls (see
     `_offset_named_facets`), that an etch or a conformal deposit can't reach (see `_outside_air`).
+
+    `occupied`, if given, keeps a small hole it mostly fills: a speck of another layer the film
+    wraps round, not air.
     """
     if geom.is_empty:
         return geom
 
+    def held(ring) -> bool:
+        hole = Polygon(ring)
+        return occupied is not None and hole.intersection(occupied).area > hole.area / 2
+
     def keep(poly: Polygon) -> Polygon:
-        holes = [ring for ring in poly.interiors if Polygon(ring).area >= max_area]
+        holes = [ring for ring in poly.interiors if Polygon(ring).area >= max_area or held(ring)]
         return Polygon(poly.exterior, holes) if holes else Polygon(poly.exterior)
 
     if isinstance(geom, MultiPolygon):
@@ -169,6 +176,8 @@ _MIN_SP_INV_FRACTION = 0.02  # slowest nonzero rate_sp_inv, relative to the fast
 _VICINAL_COS = math.cos(math.radians(10.0))
 _VICINAL_SIN = math.sin(math.radians(10.0))  # an edge within 10 deg of a facet grows like it, see _offset_named_facets
 _UNION_GRID = 1e-4  # nm - snap grid for _robust_union's fallback
+_UNION_COVER_TOL = 1e-3  # nm^2 - how much of an input a union may leave out before it's redone, see _covering_union
+_COVER_GRID = 1e-6  # nm - snap grid that measures it
 _SPLIT_TOL = 0.05  # nm - a layer vertex this close to a solid edge splits that edge (covers _SIMPLIFY_TOL drift)
 _EDGE_SNAP = 1e-6  # nm - a vertex this close to a domain edge is put exactly on it, see Geometry._snap_edges
 _GEODESIC_STEP = 0.25  # nm - an etch substep's reach is dilated in steps this long, see Geometry._reach_air
@@ -195,6 +204,28 @@ def _robust_union(geoms: list[BaseGeometry]) -> BaseGeometry:
         return unary_union(geoms)
     except shapely.errors.GEOSException:
         return shapely.union_all([g for g in geoms if not g.is_empty], grid_size=_UNION_GRID)
+
+
+def _covering_union(geoms: list[BaseGeometry]) -> BaseGeometry:
+    """`_robust_union`, checked: on nearly coincident edges, GEOS's floating-point overlay can
+    take two pieces that only touch for overlapping ones and leave one of them out of the result,
+    without raising - a whole substep's film missing from a growth, i.e. a slit through the
+    crystal. A union covers each of its inputs; one that doesn't is redone snap-rounded, which
+    never does that. Measured snap-rounded too: the floating-point overlay that would check it
+    fails the same way (and `covers` is thrown by every last-bit disagreement).
+
+    The pieces a growth merges don't overlap (each film is cut out of the solid before it), so
+    their union has the sum of their areas: only a union short of it is checked - the check costs
+    as much as the union itself."""
+    geoms = [g for g in geoms if not g.is_empty]
+    union = _robust_union(geoms)
+    if (
+        geoms
+        and float(shapely.area(geoms).sum()) - union.area > _UNION_COVER_TOL
+        and (shapely.area(shapely.difference(geoms, union, grid_size=_COVER_GRID)) > _UNION_COVER_TOL).any()
+    ):
+        union = shapely.union_all(geoms, grid_size=_UNION_GRID)
+    return union
 
 
 def sweep_union(geom: BaseGeometry, vector: tuple[float, float]) -> BaseGeometry:
@@ -772,11 +803,19 @@ class Geometry:
         polys = [l.polygon for l in self.layers if not l.polygon.is_empty]
         if not polys:
             return Polygon()
+        return self._solid_of(unary_union(polys))
+
+    def _solid_of(self, union: BaseGeometry) -> BaseGeometry:
+        """`solid()` from the plain union of every layer, already computed - `deposit_faceted`
+        keeps that union up to date substep by substep instead of re-merging every substep's film
+        each time (see there)."""
+        if union.is_empty:
+            return Polygon()
         # Closing by `_SEAM_EPS`, not just merging parts that touch: two layers (or two substeps of
         # one growth) whose shared boundary disagrees in the last few bits leave a zero-width slit
         # *between* them, which every growth step reading this shape back would otherwise treat as
         # a real crevice in the surface - and grow spikes out of.
-        merged = self._snap_edges(_clean(unary_union(polys)))
+        merged = self._snap_edges(_clean(union))
         mitre = {"join_style": "mitre"}
         with np.errstate(divide="ignore", invalid="ignore"):  # GEOS mitre on a degenerate segment - harmless
             merged = _clean(merged.buffer(_SEAM_EPS, **mitre).buffer(-_SEAM_EPS, **mitre))
@@ -845,17 +884,30 @@ class Geometry:
     def _material_at(self, x: float, y: float) -> str | None:
         """The material of the layer at (x, y), allowing for the mirror/bulk padding of `_pad`;
         falls back to the nearest layer (a probe can land a hair outside a simplified layer)."""
-        if self.floor_nm is not None and y < self.floor_nm:
-            return self.layers[0].material if self.layers else None
+        return self._material_lookup()(x, y)
 
-        probe = Point(self._reflect_into_domain(x), y)
+    def _material_lookup(self) -> Callable[[float, float], str | None]:
+        """`_material_at` for many probes against the same stack: the live layers are gathered
+        once, and each probe tests them all in one vectorised call - topmost (latest) layer first,
+        then the nearest one - instead of one Python-level `contains` per layer. Only valid while
+        the layers don't change."""
         live = [l for l in self.layers if not l.polygon.is_empty]
-        if not live:
-            return None
-        for layer in reversed(live):
-            if layer.polygon.contains(probe):
-                return layer.material
-        return min(live, key=lambda l: l.polygon.distance(probe)).material
+        polygons = np.array([l.polygon for l in live], dtype=object)
+        floor = self.floor_nm
+        bottom = self.layers[0].material if self.layers else None
+
+        def material_at(x: float, y: float) -> str | None:
+            if floor is not None and y < floor:
+                return bottom
+            if not live:
+                return None
+            px = self._reflect_into_domain(x)
+            inside = np.flatnonzero(shapely.contains_xy(polygons, px, y))
+            if inside.size:
+                return live[inside[-1]].material
+            return live[int(np.argmin(shapely.distance(polygons, Point(px, y))))].material
+
+        return material_at
 
     def _split_at_layer_boundaries(self, padded: BaseGeometry, margin: float = math.inf) -> BaseGeometry:
         """`padded` (from `_pad(self.solid())`) with every layer vertex lying on one of its exterior
@@ -864,14 +916,10 @@ class Geometry:
         GaN sidewall beneath it) into one. Edges further than `margin` outside the domain are left
         whole."""
         w = self.domain_width_nm
-        pts = []
-        for layer in self.layers:
-            for ring in layer.rings():
-                for coords in [ring["exterior"], *ring["holes"]]:
-                    pts.extend(coords)
-        if not pts:
+        # every vertex of every ring of every layer, in one vectorised call
+        v = shapely.get_coordinates([l.polygon for l in self.layers if not l.polygon.is_empty])
+        if not len(v):
             return padded
-        v = np.array(pts, dtype=float)
         v = np.vstack([v, np.column_stack([-v[:, 0], v[:, 1]]), np.column_stack([2 * w - v[:, 0], v[:, 1]])])
 
         def split_ring(coords: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -910,10 +958,12 @@ class Geometry:
         just inside its midpoint is a seed (see `seed_matches`). Edges belong to the exposed
         surface by construction, so a mask covering a seed hides it with no extra bookkeeping."""
 
+        material_at = self._material_lookup()
+
         def active(p1: tuple[float, float], p2: tuple[float, float], normal: tuple[float, float]) -> bool:
             mx = (p1[0] + p2[0]) / 2 - normal[0] * _SEED_PROBE_DEPTH
             my = (p1[1] + p2[1]) / 2 - normal[1] * _SEED_PROBE_DEPTH
-            material = self._material_at(mx, my)
+            material = material_at(mx, my)
             return material is not None and seed_matches(material, seed_materials)
 
         return active
@@ -1204,7 +1254,9 @@ class Geometry:
             seed_matches(l.material, seed_materials) for l in self.layers if not l.polygon.is_empty
         ):
             return
-        solid_before = self.solid()
+        # The union of every layer, kept up to date below as substeps add their films.
+        union = unary_union([l.polygon for l in self.layers if not l.polygon.is_empty])
+        solid_before = self._solid_of(union)
         if solid_before.is_empty:
             return
 
@@ -1221,19 +1273,33 @@ class Geometry:
         seeds = [*seed_materials, *tags.values()] if seed_materials else None
         n = max(1, math.ceil(max_rate * thickness_nm / max_substep_nm))
         start = len(self.layers)
+        solid = solid_before
         for _ in range(n):
+            count = len(self.layers)
             self._deposit_faceted_once(
                 thickness_nm / n, rate_c, rate_m, rate_sp, semi_polar_angle_deg, seeds,
-                {family: tags[m] for family, m in families.items()}, rate_sp_inv,
+                {family: tags[m] for family, m in families.items()}, rate_sp_inv, solid,
             )
+            # The solid the next substep grows on: last one's union plus this substep's films only -
+            # `solid()` would re-merge every film grown so far, a cost growing with each substep
+            # (quadratic over a thick layer).
+            added = [l.polygon for l in self.layers[count:] if not l.polygon.is_empty]
+            if added:
+                union = _covering_union([union, *added])
+                solid = self._solid_of(union)
         grown = self.layers[start:]
         del self.layers[start:]
         for layer_material, tag in tags.items():
             polys = [l.polygon for l in grown if l.material == tag]
             if not polys:
                 continue
-            film = _fill_holes(_clean(unary_union(polys)))
-            film = _drop_tiny(_close_seams(_clean(film.difference(solid_before)), solid_before))
+            film = _fill_holes(_clean(_covering_union(polys)))
+            film = _close_seams(_clean(film.difference(solid_before)), solid_before)
+            if _has_interior(film):
+                # Subtracting the solid can leave the film wrapped round a speck its seam closing
+                # made, with no layer in it: air, a construction artifact (see `_fill_holes`).
+                film = _fill_holes(film, occupied=unary_union([l.polygon for l in self.layers if not l.polygon.is_empty]))
+            film = _drop_tiny(film)
             if not film.is_empty:
                 self.layers.append(Layer(material=layer_material, polygon=film, provenance=provenance))
 
@@ -1247,10 +1313,13 @@ class Geometry:
         seed_materials: list[str] | None,
         materials_by_family: dict[str, str],
         rate_sp_inv: float = 0.0,
+        solid: BaseGeometry | None = None,
     ) -> None:
         """One single-offset substep of `deposit_faceted`, appending one Layer per material in
-        `materials_by_family` (keyed "c"/"m"/"sp", plus "sp_inv" when `rate_sp_inv` > 0)."""
-        solid = self.solid()
+        `materials_by_family` (keyed "c"/"m"/"sp", plus "sp_inv" when `rate_sp_inv` > 0).
+        `solid`: `self.solid()`, when the caller already has it."""
+        if solid is None:
+            solid = self.solid()
         if solid.is_empty:
             return
         y_min, y_max = solid.bounds[1], solid.bounds[3]
