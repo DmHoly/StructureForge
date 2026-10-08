@@ -20,7 +20,7 @@ import shapely.errors
 
 from pydantic import BaseModel, ConfigDict, Field
 from shapely.affinity import scale, translate
-from shapely.geometry import MultiPolygon, Point, Polygon, box
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon, box
 from shapely.geometry.base import BaseGeometry
 from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
@@ -35,11 +35,11 @@ _FLAP_EPS = 1e-4  # nm - opening radius that removes zero-thickness flaps from a
 _SLIVER_WIDTH = 0.025  # nm - polygons under 2x this mean thickness (2 * area / perimeter) are noise too:
                       # hairlines a near-vertical flank leaves when swept up, far below one monolayer
 _MARGIN = 1.0  # nm of slack padding used around bounding boxes for directional etch
-_GUARD_MARGIN = 1.0e4  # nm - "effectively infinite" padding for other-factor layers during etch, see Geometry.etch
 _BULK_MARGIN = 1.0e4  # nm - "effectively infinite" downward extension standing in for the wafer's bulk, see floor_nm
 _SIMPLIFY_TOL = 0.02  # nm - keeps vertex count from growing unboundedly over many substeps
 _TOUCH_EPS = 1e-6  # nm - closes a single-point/zero-width seam between sibling polygon parts;
                     # far below any real feature size, so it never bridges a genuine gap.
+_SPURIOUS_HOLE_AREA = 10.0  # nm^2 - an interior hole smaller than this is a construction artifact, see _fill_holes
 _FACET_SNAP_TOL = 1e-2  # normal-vector tolerance (~0.6 deg) for an edge to count as a named crystal facet:
                         # a c-plane top tilted by a sub-nm etch non-uniformity is still the c-plane, while
                         # genuinely distinct facets are always several degrees apart.
@@ -118,27 +118,36 @@ def _drop_tiny(geom: BaseGeometry) -> BaseGeometry:
     return geom if _is_real(geom) else Polygon()
 
 
-def _fill_holes(geom: BaseGeometry) -> BaseGeometry:
-    """Drop every interior ring from `geom`.
+def _fill_holes(geom: BaseGeometry, max_area: float = _SPURIOUS_HOLE_AREA) -> BaseGeometry:
+    """Drop every interior ring of `geom` smaller than `max_area`.
 
     `_offset_named_facets` mitres/bevels each vertex of a facet chain independently: when the
     same emergent facet must nucleate from two separate convex corners flanking a short, already-
     frozen bevel edge (left over from an earlier lopsided-rate step - see `mitre_or_bevel`), each
     corner's fan is pivoted from its own vertex with no knowledge of the other, and the two fans
     can fail to reach each other, leaving a sliver of the tip ungrown - a small, real, spurious
-    interior hole, not a physical void (this engine has no mechanism for genuine coalescence-
-    over-a-trench voids - every part of `solid` is offset independently and then unioned back
-    together). The same independent-fan construction can leave this seam either *within* one
-    `deposit_faceted` call's own film (this function is applied there directly) or *between* two
-    already-clean layers once every layer is unioned together (see `Geometry.solid()`, which
-    calls this too, guarded by `_has_interior`, whenever the merged result actually has holes) -
-    both are the same artifact, just caught at a different point in the construction.
+    interior hole, not a physical void. The same independent-fan construction can leave this seam
+    either *within* one `deposit_faceted` call's own film (this function is applied there
+    directly) or *between* two already-clean layers once every layer is unioned together (see
+    `Geometry.solid()`, which calls this too, guarded by `_has_interior`, whenever the merged
+    result actually has holes) - both are the same artifact, just caught at a different point in
+    the construction.
+
+    A hole of real size is a different thing: a cavity the growth has enclosed (a crystal
+    overflowing its mask and sealing the undercut beneath it, two fronts coalescing over a
+    trench). That one is kept - as air the growth goes on filling from its walls (see
+    `_offset_named_facets`), that an etch or a conformal deposit can't reach (see `_outside_air`).
     """
     if geom.is_empty:
         return geom
+
+    def keep(poly: Polygon) -> Polygon:
+        holes = [ring for ring in poly.interiors if Polygon(ring).area >= max_area]
+        return Polygon(poly.exterior, holes) if holes else Polygon(poly.exterior)
+
     if isinstance(geom, MultiPolygon):
-        return MultiPolygon([Polygon(g.exterior) for g in geom.geoms if not g.is_empty])
-    return Polygon(geom.exterior)
+        return MultiPolygon([keep(g) for g in geom.geoms if not g.is_empty])
+    return keep(geom)
 
 
 def _has_interior(geom: BaseGeometry) -> bool:
@@ -160,6 +169,10 @@ _VICINAL_COS = math.cos(math.radians(10.0))
 _VICINAL_SIN = math.sin(math.radians(10.0))  # an edge within 10 deg of a facet grows like it, see _offset_named_facets
 _UNION_GRID = 1e-4  # nm - snap grid for _robust_union's fallback
 _SPLIT_TOL = 0.05  # nm - a layer vertex this close to a solid edge splits that edge (covers _SIMPLIFY_TOL drift)
+_EDGE_SNAP = 1e-6  # nm - a vertex this close to a domain edge is put exactly on it, see Geometry._snap_edges
+_GEODESIC_STEP = 0.25  # nm - an etch substep's reach is dilated in steps this long, see Geometry._reach_air
+_REACH_EPS = 0.03  # nm - the part of an etch substep's reach grown after cleaning, see Geometry._reach_air
+_ETCH_SMOOTH_MAX = 0.25  # nm - cap on how far an etched layer's exposed edge is straightened, see Geometry._smooth_exposed
 
 
 def seed_matches(material: str, seed_materials: list[str]) -> bool:
@@ -218,7 +231,8 @@ def _offset_named_facets(
     edge_active: Callable[[tuple[float, float], tuple[float, float], tuple[float, float]], bool] | None = None,
     x_window: tuple[float, float] | None = None,
 ) -> dict[str, BaseGeometry]:
-    """Advance each straight edge of `solid`'s exterior ring(s) along its own outward normal by
+    """Advance each straight edge of `solid`'s rings (exterior and, for an enclosed void, interior -
+    see `_fill_holes`) along its own outward normal by
     the distance named for that exact direction in `named_directions` (nx, ny, distance, family
     label) - 0 (or absent) for any direction not meant to move. Every other edge (any normal not
     in the list at all) is left exactly where it is.
@@ -243,7 +257,8 @@ def _offset_named_facets(
     top consumed by its flanking SP facets closes to a single apex, and a nucleating SP facet
     trims the neighbouring c-plane strip exactly instead of leaving a sliver of it behind. Only
     true facets bound their neighbours: an off-axis, non-moving edge (a curved mask wall) does not.
-    An edge within 10 degrees of a facet (a vicinal surface) grows like that facet.
+    An edge within 10 degrees of a facet (a vicinal surface) grows like that facet, and bounds its
+    neighbours with that facet's exact line.
 
     This gives a rate of 0 a real guarantee a shared global growth vector never could: that facet's
     *own line* never moves, no matter how far a neighbouring facet advances - only how much of it
@@ -278,10 +293,12 @@ def _offset_named_facets(
     def is_facet(nx: float, ny: float) -> bool:
         return any(abs(nx - fx) < _FACET_SNAP_TOL and abs(ny - fy) < _FACET_SNAP_TOL for fx, fy in facet_normals)
 
-    def classify(nx: float, ny: float) -> tuple[float, str]:
+    def classify(nx: float, ny: float) -> tuple[float, str, tuple[float, float]]:
+        """(distance, family label, the exact facet normal) for an edge normal - `(0, "", the
+        normal itself)` when it isn't a facet."""
         for dx, dy, d, label, _ang in named:
             if abs(nx - dx) < _FACET_SNAP_TOL and abs(ny - dy) < _FACET_SNAP_TOL:
-                return d, label
+                return d, label, (dx, dy)
         # A vicinal surface - a few degrees off a facet, e.g. the floor of a sub-nm etch dip -
         # grows by step flow at that facet's rate rather than staying pinned: left pinned, it would
         # persist as a crevice carried up through every later layer.
@@ -289,8 +306,8 @@ def _offset_named_facets(
         if fx * nx + fy * ny > _VICINAL_COS and not any(
             abs(nx - px) < _FACET_SNAP_TOL and abs(ny - py) < _FACET_SNAP_TOL for px, py in facet_normals
         ):
-            return d, label
-        return 0.0, ""
+            return d, label, (fx, fy)
+        return 0.0, "", (nx, ny)
 
     def mitre_or_bevel(
         v: tuple[float, float],
@@ -341,15 +358,19 @@ def _offset_named_facets(
         pieces_by_family.setdefault(label, []).append(geom)
 
     parts = list(solid.geoms) if isinstance(solid, MultiPolygon) else [solid]
-    for part in parts:
-        part = orient(part, sign=1.0)
-        coords = list(part.exterior.coords)[:-1]
+    # An interior ring is an enclosed void (see `_fill_holes`): its walls grow exactly like the
+    # outer surface. `orient` makes the exterior counter-clockwise and the holes clockwise, so
+    # the same right-hand normal points out of the solid - into the void - for both.
+    rings = [ring for part in parts for ring in (lambda q: [q.exterior, *q.interiors])(orient(part, sign=1.0))]
+    for ring in rings:
+        coords = list(ring.coords)[:-1]
         coords = [p for i, p in enumerate(coords) if p != coords[i - 1]]
         n = len(coords)
         if n < 3:
             continue
 
         normals: list[tuple[float, float]] = []
+        facet_dirs: list[tuple[float, float]] = []
         lengths: list[float] = []
         dists: list[float] = []
         labels: list[str] = []
@@ -361,13 +382,14 @@ def _offset_named_facets(
             nx, ny = (y2 - y1) / length, -(x2 - x1) / length
             normals.append((nx, ny))
             lengths.append(length)
-            d, label = classify(nx, ny)
+            d, label, facet_dir = classify(nx, ny)
             is_active = not outside(x1, x2) and (edge_active is None or edge_active((x1, y1), (x2, y2), (nx, ny)))
             if not is_active:
                 d, label = 0.0, ""
             active.append(is_active)
             dists.append(d)
             labels.append(label)
+            facet_dirs.append(facet_dir)
 
         # A sub-nm step - a riser between two parallel terraces, possibly made of a few sub-nm
         # edges (an etch leaves the floor of an opening in terraces a few angstroms apart) - is
@@ -396,10 +418,24 @@ def _offset_named_facets(
                 nx, ny = normals[i]
                 dists[i] = dists[before] * max(0.0, nx * bx + ny * by)
                 labels[i] = labels[before]
+                facet_dirs[i] = facet_dirs[before]
 
         # Each edge line's offset half-plane {p : n.p <= n.v + d}: the bound every piece near that
-        # edge must respect - including a rate-0 (pinned) line, which never moves.
-        offsets = [(normals[i][0], normals[i][1], normals[i][0] * coords[i][0] + normals[i][1] * coords[i][1] + dists[i]) for i in range(n)]
+        # edge must respect - including a rate-0 (pinned) line, which never moves. A vicinal edge
+        # bounds with its facet's *exact* line, through its outermost end: its own slightly tilted
+        # line, extended across a wide neighbour, would shave a wedge off that neighbour's front
+        # (a 0.6 deg ramp at one end of an opening's floor cutting 2 nm off the far end of the
+        # c-plane strip), while the exact line through the outer end lies outside everything the
+        # edge itself grows.
+        offsets: list[tuple[float, float, float]] = []
+        for i in range(n):
+            nx, ny = normals[i]
+            (x1, y1), (x2, y2) = coords[i], coords[(i + 1) % n]
+            if labels[i] and not is_facet(nx, ny):
+                fx, fy = facet_dirs[i]
+                offsets.append((fx, fy, max(fx * x1 + fy * y1, fx * x2 + fy * y2) + dists[i]))
+            else:
+                offsets.append((nx, ny, nx * x1 + ny * y1 + dists[i]))
         convex_at: list[bool] = []
         # Convex, or concave by only a few degrees (an angstrom-deep dip in a facet): a bound found
         # across such a corner still belongs to the same run of facets.
@@ -455,11 +491,20 @@ def _offset_named_facets(
                 corners.add((k + 1) % n)
                 counted += lengths[k % n] >= _MIN_NUCLEATION_EDGE
             # Only a real crystal facet bounds its neighbours (a rate-0 one included: its line is
-            # pinned). An off-axis edge - a curved mask wall, a sub-nm etch dip - or a non-seed edge
-            # has no growth front of its own to stop anything at.
+            # pinned) - a vicinal one too, since it grows as that facet (see `classify`): a
+            # sidewall a fraction of a degree off vertical, as the first strip up from an etched
+            # floor leaves it, must still stop the semi-polar strip nucleating above it, or that
+            # strip pokes several nm past the sidewall's own front and the sidewall, catching up
+            # underneath over the following substeps, is left with a step. An off-axis edge - a
+            # curved mask wall, a sub-nm etch dip - or a non-seed edge has no growth front of its
+            # own to stop anything at.
             # A facet nucleating at a corner of the run bounds it too, or the neighbouring edge's
             # strip would poke past it and leave a sliver of edge for the next growth step to grow.
-            planes = [offsets[j] for j in idx if j in own or (active[j] and not riser[j] and is_facet(*normals[j]))]
+            planes = [
+                offsets[j]
+                for j in idx
+                if j in own or (active[j] and not riser[j] and (is_facet(*normals[j]) or labels[j]))
+            ]
             return planes + [plane for c in corners for plane in nucleated[c]]
 
         def clipped(points: list[tuple[float, float]], planes: list[tuple[float, float, float]]) -> BaseGeometry:
@@ -622,17 +667,17 @@ class Geometry:
       geometry mirrored across `x=0` and `x=domain_width_nm` and is cropped back afterwards, so a
       feature near the edge behaves as if the pattern repeats past the boundary instead of
       rounding off oddly. Keep the domain wide enough that features of interest aren't hugging it.
-    - **Selective etch runs in substeps.** Each substep erodes/sweeps the solid once per distinct
-      rate factor present, with every *other*-factor layer temporarily padded to an effectively
-      infinite thickness so that factor's erosion can only ever consume its own material - never
-      tunnel through a thinner, slower-etching layer (a resist mask, a stop layer) into whatever
-      sits beneath it. What's actually removed is intersected back against the real, unpadded
-      per-layer polygons, so the padding never leaks into the result - only into how far a given
-      substep's erosion is allowed to reach. This gets multi-material selectivity, masked
-      undercut, and etch-through-once-a-mask-is-fully-consumed all correct without a full
-      level-set solver, at the residual cost of a finite-step-size error bounded by roughly one
-      substep's depth (see `etch`'s `steps` parameter) - the same kind of discretisation error any
-      explicit time-stepping scheme has, not a structural limitation.
+    - **Selective etch runs in substeps.** Each substep finds, per distinct rate factor present,
+      what that factor's reach of the current air can get to without passing through any
+      slower-etching layer, and removes from each layer only its own factor's share. A thinner,
+      slower-etching layer (a resist mask, a stop layer) is never tunnelled through, the
+      material under a mask is only reached round the mask's edge, and a slower layer being
+      exposed (an oxide etch reaching the substrate) doesn't stop the faster material beside it
+      from receding. This gets multi-material selectivity, masked undercut, and etch-through-
+      once-a-mask-is-fully-consumed all correct without a full level-set solver, at the residual
+      cost of a finite-step-size error bounded by roughly one substep's depth (see `etch`'s
+      `steps` parameter) - the same kind of discretisation error any explicit time-stepping
+      scheme has, not a structural limitation.
     """
 
     def __init__(self, domain_width_nm: float, layers: list[Layer] | None = None):
@@ -665,11 +710,11 @@ class Geometry:
         # one growth) whose shared boundary disagrees in the last few bits leave a zero-width slit
         # *between* them, which every growth step reading this shape back would otherwise treat as
         # a real crevice in the surface - and grow spikes out of.
-        merged = _clean(unary_union(polys))
+        merged = self._snap_edges(_clean(unary_union(polys)))
         mitre = {"join_style": "mitre"}
         with np.errstate(divide="ignore", invalid="ignore"):  # GEOS mitre on a degenerate segment - harmless
             merged = _clean(merged.buffer(_SEAM_EPS, **mitre).buffer(-_SEAM_EPS, **mitre))
-        return _fill_holes(merged) if _has_interior(merged) else merged
+        return _fill_holes(merged) if _has_interior(merged) else merged  # only the spurious ones
 
     def bounds(self) -> tuple[float, float, float, float]:
         solid = self.solid()
@@ -679,9 +724,33 @@ class Geometry:
 
     # -- domain-edge handling --------------------------------------------
 
+    def _snap_edges(self, geom: BaseGeometry) -> BaseGeometry:
+        """`geom` with every vertex within `_EDGE_SNAP` of a domain edge moved exactly onto it.
+
+        Boolean ops leave a vertex that should sit on `x=0` at `x=1e-17` or so. `_mirror_pad`
+        then unions the shape with a mirror copy whose matching vertex sits at `-1e-17`: no longer
+        an exactly shared edge, so GEOS keeps the two as separate parts of a `MultiPolygon` and
+        the domain edge reads back as an *exposed surface* - a conformal deposit coats it, an
+        isotropic etch eats into it, one sub-step at a time, and `etch()` sees the substrate as
+        "exposed" through it and guards the whole domain against the faster factors.
+        """
+        if geom.is_empty:
+            return geom
+        w = self.domain_width_nm
+
+        def snap(coords: np.ndarray) -> np.ndarray:
+            coords = coords.copy()
+            x = coords[:, 0]
+            x[np.abs(x) < _EDGE_SNAP] = 0.0
+            x[np.abs(x - w) < _EDGE_SNAP] = w
+            return coords
+
+        return shapely.transform(geom, snap)
+
     def _mirror_pad(self, geom: BaseGeometry) -> BaseGeometry:
         if geom.is_empty:
             return geom
+        geom = self._snap_edges(geom)
         left = scale(geom, xfact=-1, yfact=1, origin=(0.0, 0.0))
         right = scale(geom, xfact=-1, yfact=1, origin=(self.domain_width_nm, 0.0))
         return _clean(unary_union([geom, left, right]))
@@ -762,7 +831,7 @@ class Geometry:
 
         parts = list(padded.geoms) if isinstance(padded, MultiPolygon) else [padded]
         split = [
-            Polygon(split_ring(list(p.exterior.coords)), [list(r.coords) for r in p.interiors])
+            Polygon(split_ring(list(p.exterior.coords)), [split_ring(list(r.coords)) for r in p.interiors])
             for p in parts
             if not p.is_empty
         ]
@@ -786,23 +855,6 @@ class Geometry:
     def _clamp_floor(self, y: float) -> float:
         return y if self.floor_nm is None else max(y, self.floor_nm)
 
-    def _guard_extend_up(self, geom: BaseGeometry) -> BaseGeometry:
-        """`geom` (a layer's polygon) extended far upward *within each of its own connected
-        components' x-span* - not a uniform outward buffer, which would balloon sideways and
-        swallow unrelated features. Used by `etch()` to make a slower-etching layer (a mask) act
-        as effectively bottomless for one substep's faster erosion, without changing its footprint
-        or affecting whatever sits *beneath* it.
-        """
-        if geom.is_empty:
-            return geom
-        parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
-        extended = []
-        for part in parts:
-            minx, _, maxx, maxy = part.bounds
-            above = box(minx, maxy, maxx, maxy + _GUARD_MARGIN)
-            extended.append(unary_union([part, above]))
-        return _clean(unary_union(extended))
-
     def _shadow(self, solid: BaseGeometry, angle_deg: float, y_min: float, y_max: float) -> BaseGeometry:
         """The region shadowed by `solid` for a beam tilted `angle_deg`: everywhere "behind"
         existing material, continuing in the beam's own forward direction, out to a length that
@@ -824,6 +876,20 @@ class Geometry:
         dx, dy = beam_vector(angle_deg, span)
         swept = sweep_union(padded, (dx, dy))
         return swept.difference(padded)
+
+    @staticmethod
+    def _outside_air(air: BaseGeometry, air_box: BaseGeometry) -> BaseGeometry:
+        """The parts of `air` (= `air_box` minus the padded solid) connected to the outside, i.e.
+        touching the box's own boundary. A part that doesn't is a void sealed inside the solid
+        (see `_fill_holes`): no etchant and no precursor gets in, so an etch or a conformal
+        deposit must not act on its walls."""
+        if air.is_empty or not isinstance(air, MultiPolygon):
+            return air
+        edge = air_box.boundary
+        kept = [part for part in air.geoms if part.intersects(edge)]
+        if len(kept) == len(air.geoms):
+            return air
+        return _clean(unary_union(kept)) if kept else Polygon()
 
     def _domain_box(self, y_min: float, y_max: float) -> BaseGeometry:
         return box(0.0, y_min, self.domain_width_nm, y_max)
@@ -852,7 +918,13 @@ class Geometry:
         y_min, y_max = (solid.bounds[1], solid.bounds[3]) if not solid.is_empty else (0.0, 0.0)
         padded = self._pad(solid)
         grown = padded.buffer(thickness_nm, quad_segs=12)
-        film = self._crop(grown.difference(padded), y_min - thickness_nm, y_max + thickness_nm)
+        film = grown.difference(padded)
+        if _has_interior(padded):
+            # Only the surface open to the outside is coated: a void sealed inside the solid
+            # (see `_fill_holes`) stays empty.
+            air_box = box(*grown.bounds).buffer(_MARGIN)
+            film = film.intersection(self._outside_air(_clean(air_box.difference(padded)), air_box))
+        film = self._crop(film, y_min - thickness_nm, y_max + thickness_nm)
         if open_x_ranges and not film.is_empty:
             y0, y1 = y_min - thickness_nm - 10.0, y_max + thickness_nm + 10.0
             openings = unary_union([box(x0, y0, x1, y1) for x0, x1 in open_x_ranges])
@@ -1240,18 +1312,17 @@ class Geometry:
         Runs in substeps so a mixed-rate recipe advances each material's own front correctly,
         including etching through a thin masking layer into whatever sits below it.
 
-        Each substep computes one erosion/sweep per distinct rate factor present. Any *slower*
-        layer that is itself currently exposed to the true surface (a resist mask, a stop layer -
-        checked against the padded solid's boundary, so the wafer floor and domain edges don't
-        count) is temporarily extended far upward (`_GUARD_MARGIN`) before a *faster* factor's
-        erosion is computed - otherwise, once that slower layer gets thinner than one substep's
-        depth at the faster rate, the faster erosion would tunnel straight through it into
-        whatever sits beneath, ignoring the mask. A slower layer that isn't itself exposed (e.g. a
-        slow-etching substrate buried under a faster top layer) is left alone: it isn't in the way
-        of anything this substep, and extending it upward would incorrectly swallow whatever
-        faster material sits above it. What's actually removed is always intersected back against
-        the real, unextended per-layer polygons, so the padding never leaks into the result itself
-        - it only prevents a given substep's erosion from reaching further than it should.
+        Each substep takes the current air (everything around the solid that isn't solid) and,
+        per distinct rate factor present, finds what that factor's reach (`substep * factor`)
+        of air can get to without passing through any *slower* layer - see `_reach_air`. A
+        layer loses exactly its own intersection with its own factor's ring, so a mask is only
+        ever consumed at its own rate, the material under it only from where the air actually
+        reaches (round the mask's edge, never through it), and the material beside a slower
+        layer keeps receding even once that layer is exposed.
+
+        Afterwards, sub-angstrom films left by the final substep are removed, and the exposed
+        edges of slowly-etched layers are straightened to within their own step height (see the
+        end of this method and `_smooth_exposed`).
         """
         if depth_nm <= 0 or not self.layers:
             return
@@ -1264,15 +1335,10 @@ class Geometry:
             if solid.is_empty:
                 break
             y_min, y_max = solid.bounds[1], solid.bounds[3]
-            # Padded (mirrored + bulk-extended) once per substep: used below to test whether a
-            # layer is exposed to the *true* surface, without the wafer floor or the domain's
-            # left/right edges - which are real edges of the raw `solid` polygon but not real
-            # exposure - registering as false positives. Also the basis for this substep's
-            # shadow (directional mode only) - computed from the *plain* solid, never the
-            # per-factor guard (which deliberately makes a mask look near-infinitely thick and
-            # would cast a wildly oversized false shadow if used here).
+            # Padded (mirrored + bulk-extended) once per substep: the wafer floor and the domain's
+            # left/right edges are real edges of the raw `solid` polygon but not real surface, so
+            # neither the air nor the shadow (directional mode only) may see them.
             padded_plain = self._pad(solid)
-            padded_solid_boundary = padded_plain.boundary
             shadow = (
                 self._shadow(solid, recipe.angle_deg, y_min, y_max)
                 if recipe.mode is EtchMode.directional
@@ -1286,38 +1352,31 @@ class Geometry:
                 factor_by_index[i] = recipe.factor_for(materials.get(layer.material))
             distinct_factors = sorted(set(factor_by_index.values()))
 
+            # This substep's "air": everything in a box around the padded solid that isn't solid.
+            # Each factor's erosion ring is the solid within that factor's reach of the air -
+            # reach measured *through air and faster/equal material only*: see _reach_air.
+            reach_max = substep * distinct_factors[-1]
+            px0, _, px1, _ = padded_plain.bounds
+            air_box = box(
+                px0 - reach_max - _MARGIN, y_min - reach_max - _MARGIN, px1 + reach_max + _MARGIN, y_max + reach_max + _MARGIN
+            )
+            air = self._outside_air(_clean(air_box.difference(padded_plain)), air_box)
+
             ring_by_factor: dict[float, BaseGeometry] = {}
             for factor in distinct_factors:
                 if factor <= 0:
                     ring_by_factor[factor] = Polygon()
                     continue
-                # Only guard against *slower* other layers that are themselves currently exposed
-                # to the true surface: a mask sitting on top of this factor's own material could
-                # otherwise be tunnelled through once it's thinner than this substep's depth. A
-                # slower layer that isn't exposed at all (e.g. a slow-etching substrate buried
-                # under a faster top layer) isn't "in the way" of anything this substep and would
-                # only corrupt the guard if extended upward regardless (see the etch() docstring).
-                slower_layers = [
+                blockers = [
                     self.layers[i].polygon
                     for i, f in factor_by_index.items()
-                    if f < factor
-                    and not self.layers[i].polygon.is_empty
-                    and self.layers[i].polygon.intersects(padded_solid_boundary)
+                    if f < factor and not self.layers[i].polygon.is_empty
                 ]
-                guard = solid if not slower_layers else _clean(
-                    unary_union([solid] + [self._guard_extend_up(p) for p in slower_layers])
-                )
-                padded = self._pad(guard)
-                if recipe.mode is EtchMode.isotropic:
-                    eroded = padded.buffer(-substep * factor, quad_segs=12)
-                    ring = padded.difference(eroded)
-                else:
-                    dx, dy = beam_vector(recipe.angle_deg, substep * factor)
-                    px0, _, px1, _ = padded.bounds
-                    air_bbox = box(px0 - 1.0, y_min - substep * factor - _MARGIN, px1 + 1.0, y_max + _MARGIN)
-                    air = air_bbox.difference(padded)
-                    swept_air = sweep_union(air, (dx, dy))
-                    ring = padded.intersection(swept_air).difference(shadow)
+                blocked = self._mirror_pad(_clean(unary_union(blockers))) if blockers else Polygon()
+                reached = self._reach_air(air, air_box, blocked, substep * factor, recipe)
+                ring = padded_plain.intersection(reached)
+                if shadow is not None:
+                    ring = ring.difference(shadow)
                 ring_by_factor[factor] = self._crop(ring, y_min - substep - _MARGIN, y_max + _MARGIN)
 
             removed_parts = [
@@ -1328,11 +1387,18 @@ class Geometry:
             removed_parts = [p for p in removed_parts if not p.is_empty]
             if not removed_parts:
                 continue
-            total_removed = _clean(unary_union(removed_parts))
-            new_solid = _clean(solid.difference(total_removed))
+            # Validity fixes only between substeps, no simplification: Douglas-Peucker trims a
+            # curved front by up to its tolerance every time it runs, and where it starts
+            # differs from one side of an opening to the other - over forty substeps that
+            # drift made a symmetric undercut visibly lopsided. Cleaned once, below.
+            total_removed = unary_union(removed_parts).buffer(0)
+            new_solid = solid.difference(total_removed).buffer(0)
             for layer in self.layers:
                 if not layer.polygon.is_empty:
-                    layer.polygon = _drop_tiny(_clean(layer.polygon.intersection(new_solid)))
+                    layer.polygon = _drop_tiny(layer.polygon.intersection(new_solid).buffer(0))
+        for layer in self.layers:
+            if not layer.polygon.is_empty:
+                layer.polygon = _drop_tiny(_clean(layer.polygon))
 
         # The last substep can stop a hair short of a layer's far side, leaving a sub-angstrom film
         # (e.g. on the floor of a mask opening) that a real over-etch would clear - and that would
@@ -1342,6 +1408,148 @@ class Geometry:
                 continue
             opened = layer.polygon.buffer(-_RESIDUE_NM, join_style="mitre").buffer(_RESIDUE_NM, join_style="mitre")
             layer.polygon = _drop_tiny(_clean(layer.polygon.intersection(opened)))
+
+        # Time-stepping leaves its mark on a slowly-etched surface that a faster neighbour uncovers
+        # bit by bit (the underside of a nitride mask as the oxide beneath it is undercut): each
+        # substep bites one more `substep * factor` out of the part uncovered so far, so the front
+        # that should be a smooth slope comes out as a staircase - or, with round erosion, a row
+        # of scallops - of exactly that step height, drawn as a ragged, wavy edge. Straighten each
+        # etched layer's *exposed* edges to within its own step height (never more than a couple
+        # of monolayers); the edges it shares with other layers are left exactly as they are, so
+        # neighbours still fit together without slits or overlaps.
+        fastest = max((recipe.factor_for(materials.get(l.material)) for l in self.layers if not l.polygon.is_empty), default=0.0)
+        for layer in self.layers:
+            factor = recipe.factor_for(materials.get(layer.material))
+            if layer.polygon.is_empty or factor <= 0 or factor >= fastest:
+                continue  # the fastest layer is never uncovered by anything: its front is already smooth
+            others = [l.polygon for l in self.layers if l is not layer and not l.polygon.is_empty]
+            interface = unary_union(others) if others else Polygon()
+            tol = min(1.5 * substep * factor, _ETCH_SMOOTH_MAX)
+            layer.polygon = self._smooth_exposed(layer.polygon, tol, interface)
+
+    def _reach_air(
+        self, air: BaseGeometry, air_box: BaseGeometry, blocked: BaseGeometry, reach: float, recipe: EtchRecipe
+    ) -> BaseGeometry:
+        """Everything within `reach` of `air` *without passing through `blocked`* - the region one
+        substep of an etch at that reach can remove, for a factor whose slower-etching layers are
+        `blocked` (mirror-padded). Isotropic: a round dilation of the air; directional: the air
+        swept along the beam.
+
+        A plain dilation would tunnel: a mask thinner than `reach` (a resist eroding away, a stop
+        layer, a sub-nm residue) is no obstacle to it, and whatever sits beneath the mask would be
+        removed as if the mask weren't there. Padding slower layers to "effectively infinite"
+        thickness was the previous answer, but a layer extended upward within its own x-span
+        swallows everything above it: the moment an oxide etch reaches the substrate, the whole
+        domain is guarded and the undercut under the mask stops dead. Here the dilation is simply
+        clipped to the passable region (everything but `blocked`), and - only while some blocker
+        is actually thinner than `reach`, since a thick one can't be tunnelled - done in steps no
+        longer than `_GEODESIC_STEP`, each clipped in turn: air creeps round a mask, never through
+        it, and a slower layer anywhere - above, beneath, buried - bounds how far the faster
+        erosion gets.
+
+        The last `_REACH_EPS` of the reach is grown separately, *after* the result is cleaned.
+        Where the dilated air is tangent to a layer interface (an undercut creeping along the
+        underside of a mask), the arc meets that line in a run of sub-nm segments, and `_clean`'s
+        simplification can drop the exact meeting point - leaving the ring a hair short of the
+        interface and the layer with a sub-nm "roof" over what should be an open trench; a roof
+        is a hole, the solid fills holes, and the etch stops. Overshooting the interface by that
+        hair costs nothing (the ring is intersected with each layer separately) and makes the
+        ring robust to it.
+        """
+        if air.is_empty or reach <= 0:
+            return Polygon()
+        isotropic = recipe.mode is EtchMode.isotropic
+
+        def grow(geom: BaseGeometry, by: float) -> BaseGeometry:
+            if isotropic:
+                return geom.buffer(by, quad_segs=12)
+            return sweep_union(geom, beam_vector(recipe.angle_deg, by))
+
+        eps = min(_REACH_EPS, reach / 2)
+        inner = reach - eps
+        if blocked.is_empty:
+            reached = grow(air, inner)
+        else:
+            passable = _clean(air_box.difference(blocked))
+            mitre = {"join_style": "mitre"}
+            thin = blocked.difference(blocked.buffer(-reach / 2, **mitre).buffer(reach / 2, **mitre))
+            if thin.area <= reach * reach:
+                reached = grow(air, inner).intersection(passable)
+            else:
+                n = max(1, math.ceil(inner / _GEODESIC_STEP))
+                reached = air
+                for _ in range(n):
+                    # No simplification between steps: Douglas-Peucker always cuts a convex
+                    # arc's corners inward, and hundreds of such cuts would bias the front.
+                    reached = grow(reached, inner / n).intersection(passable).buffer(0)
+        return grow(_clean(reached), eps)
+
+    def _smooth_exposed(self, geom: BaseGeometry, tol: float, interface: BaseGeometry) -> BaseGeometry:
+        """`geom` with its *exposed* edges simplified to within `tol` (Douglas-Peucker), every
+        vertex that touches `interface` (the other layers), a domain edge or the wafer floor kept
+        exactly where it is. See the end of `etch` for why only the exposed edges: a layer's
+        shared boundaries must stay bit-identical to its neighbours'. Any area the simplification
+        adds is cut back to outside `interface` again, so it can't overlap a neighbour either."""
+        if geom.is_empty or tol <= 0:
+            return geom
+        w = self.domain_width_nm
+        floor = self.floor_nm
+
+        def locked(pts: np.ndarray) -> np.ndarray:
+            on_edge = (np.abs(pts[:, 0]) < _SPLIT_TOL) | (np.abs(pts[:, 0] - w) < _SPLIT_TOL)
+            if floor is not None:
+                on_edge |= np.abs(pts[:, 1] - floor) < _SPLIT_TOL
+            if interface.is_empty:
+                return on_edge
+            # A vertex is free to move only if *both* edges it joins are fully exposed. Testing
+            # the vertex alone isn't enough: where a neighbour ends partway along an edge (an
+            # oxide undercut stopping under a resist's underside), that edge's far vertex touches
+            # nothing itself, yet moving it would peel the edge off the neighbour - a hairline
+            # slit of "air" the next substep would flood straight into.
+            edges = shapely.linestrings(np.stack([pts, np.roll(pts, -1, axis=0)], axis=1))
+            touching = shapely.distance(edges, interface) < _SPLIT_TOL
+            return on_edge | touching | np.roll(touching, 1)
+
+        def smooth_ring(ring) -> list[tuple[float, float]]:
+            pts = np.asarray(ring.coords)[:-1]
+            n = len(pts)
+            if n < 4:
+                return [tuple(p) for p in pts]
+            lock = locked(pts)
+            if not lock.any():
+                simplified = Polygon(pts).simplify(tol, preserve_topology=True)
+                return list(simplified.exterior.coords)[:-1] if not simplified.is_empty else [tuple(p) for p in pts]
+            if lock.all():
+                return [tuple(p) for p in pts]
+            start = int(np.argmax(lock))
+            order = [(start + k) % n for k in range(n)] + [start]
+            out: list[tuple[float, float]] = []
+            run: list[int] = [order[0]]
+            for idx in order[1:]:
+                run.append(idx)
+                if lock[idx]:
+                    chain = [tuple(pts[i]) for i in run]
+                    if len(chain) > 2:
+                        chain = list(LineString(chain).simplify(tol, preserve_topology=False).coords)
+                    out.extend(chain[:-1])
+                    run = [idx]
+            return out
+
+        parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
+        rebuilt = []
+        for part in parts:
+            shell = smooth_ring(part.exterior)
+            holes = [smooth_ring(h) for h in part.interiors]
+            if len(shell) < 3:
+                continue
+            rebuilt.append(Polygon(shell, [h for h in holes if len(h) >= 3]))
+        if not rebuilt:
+            return geom
+        result = _clean(unary_union(rebuilt))
+        if not interface.is_empty:
+            result = result.difference(interface)
+        result = _drop_tiny(_clean(result))
+        return result if not result.is_empty else geom
 
     def planarize(self, target_level_nm: float | None = None, stop_material: str | None = None) -> None:
         """Cut the stack flat at `target_level_nm`, or - given `stop_material` instead - at the
