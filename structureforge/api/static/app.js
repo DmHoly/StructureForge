@@ -329,6 +329,7 @@ function buildStepFromForm() {
       rate_c: parseFloat($("fac-rate-c").value),
       rate_m: parseFloat($("fac-rate-m").value),
       rate_sp: parseFloat($("fac-rate-sp").value),
+      rate_sp_inv: parseFloat($("fac-rate-sp-inv").value) || 0,
       semi_polar_angle_deg: parseFloat($("fac-angle-sp").value),
       seed_materials: seedText ? seedText.split(",").map((s) => s.trim()).filter(Boolean) : [],
     };
@@ -481,6 +482,7 @@ function populateFormFromStep(step) {
     $("fac-rate-c").value = step.rate_c ?? 1;
     $("fac-rate-m").value = step.rate_m ?? 0.25;
     $("fac-rate-sp").value = step.rate_sp ?? 0.5;
+    $("fac-rate-sp-inv").value = step.rate_sp_inv ?? 0;
     $("fac-angle-sp").value = step.semi_polar_angle_deg ?? 30;
     $("fac-seed-materials").value = (step.seed_materials || []).join(", ");
     updateFacetedTipHint();

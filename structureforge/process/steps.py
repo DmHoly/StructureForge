@@ -135,6 +135,10 @@ class FacetedGrowth(BaseModel):
     - semi-polar facets → rate_sp (inclined planes, e.g. {10-11} or {11-22};
                                     angle from c-axis = semi_polar_angle_deg)
 
+plus an optional fourth, off by default:
+
+    - inverted semi-polar facets {10-1-1} → rate_sp_inv (same angle, facing down and out)
+
     `thickness` is the nominal growth increment for the c-plane (rate_c * thickness nm of
     material are added above flat c-plane surfaces); m-plane and semi-polar faces advance by
     rate_m * thickness and rate_sp * thickness respectively. A rate of 0 pins that facet's own
@@ -147,8 +151,14 @@ class FacetedGrowth(BaseModel):
     around the shape as it develops - `rate_c` vs. `rate_sp`/`rate_m` decide whether that shape
     stays a flat-topped pencil or narrows into a sharp point.
 
-    `material_c`/`material_m`/`material_sp` let each facet family incorporate a different
-    material - typically the same alloy at a different composition, matching real facet-
+    `rate_sp_inv` > 0 lets the crystal spread past sidewalls that don't grow (rate_m = 0, or not a
+    seed material) instead of being held inside them: an inverted facet forms under the
+    overhang and its foot slides down the bare sidewall - a shell nucleating on a nanowire's tip
+    and creeping down it, ending as a hexagon (c-plane top, SP facets, inverted SP facets) around
+    the tip. Its foot drops by rate_sp_inv * thickness / cos(semi_polar_angle_deg).
+
+    `material_c`/`material_m`/`material_sp`/`material_sp_inv` let each facet family incorporate a
+    different material - typically the same alloy at a different composition, matching real facet-
     dependent incorporation (e.g. more indium on the c-plane than on the semi-polar sidewalls).
     Left unset (the default), each falls back to `material`; when all three resolve to the same
     name this step adds one layer, otherwise one layer per distinct material, each holding only
@@ -171,12 +181,14 @@ class FacetedGrowth(BaseModel):
     material_c: str | None = None
     material_m: str | None = None
     material_sp: str | None = None
+    rate_sp_inv: float = 0.0
+    material_sp_inv: str | None = None
 
     @model_validator(mode="after")
     def _check_rates(self) -> "FacetedGrowth":
-        if self.rate_c < 0 or self.rate_m < 0 or self.rate_sp < 0:
+        if self.rate_c < 0 or self.rate_m < 0 or self.rate_sp < 0 or self.rate_sp_inv < 0:
             raise ValueError("growth rates must be >= 0")
-        if self.rate_c == 0 and self.rate_m == 0 and self.rate_sp == 0:
+        if self.rate_c == 0 and self.rate_m == 0 and self.rate_sp == 0 and self.rate_sp_inv == 0:
             raise ValueError("at least one growth rate must be > 0")
         if not (0.0 < self.semi_polar_angle_deg < 90.0):
             raise ValueError(f"semi_polar_angle_deg must be in (0, 90), got {self.semi_polar_angle_deg}")

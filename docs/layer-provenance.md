@@ -212,7 +212,7 @@ calculé si `Length.derived(...)`.
 | Step | `provenance` posée automatiquement par `simulate()` |
 |---|---|
 | `EpitaxialGrowth` | ✅ (`thickness`, `orientation`, `angle_deg`, `seed_materials`) |
-| `FacetedGrowth` | ✅ (`thickness`, `rate_c`, `rate_m`, `rate_sp`, `semi_polar_angle_deg`, `seed_materials`) |
+| `FacetedGrowth` | ✅ (`thickness`, `rate_c`, `rate_m`, `rate_sp`, `rate_sp_inv` si > 0, `semi_polar_angle_deg`, `seed_materials`) |
 | `FacetEnvelope` | ✅ (`c_plane`, `m_plane`, `semi_polar_angle_deg`, `seed_materials`, `top_level` si fourni) |
 | `Deposition`, `Etch`, `Lithography`, `Planarization`, `Flip`, `ResistStrip`, `ChemicalStep` | ❌ - `Layer.provenance` reste `None` |
 

@@ -280,6 +280,16 @@ def _offset_named_facets(
     edges made of a seed material) - every other edge is treated as rate 0 whatever its direction,
     and a new facet only nucleates at a convex corner whose two edges are both active.
 
+    Overhangs: a named direction labelled "sp_inv" is an inverted semi-polar facet, facing down
+    and out ({10-1-1}, normal (±sin θ, -cos θ)). Where a growing edge facing up or out (c, m or
+    SP) sits right on top of a sidewall that doesn't move (a rate-0 or non-seed m-plane), that
+    sidewall stops bounding it: the inverted facet nucleates at their corner, under the growing
+    edge, and the crystal spreads past the sidewall's line with that facet as its underside. Its
+    foot - where it meets the sidewall - then slides down that sidewall as it advances, at
+    d / cos θ (mitred exactly: a steep inverted facet's foot outruns `mitre_or_bevel`'s limit),
+    the way a shell nucleated on a nanowire's tip spreads down its bare sidewalls. Without an
+    "sp_inv" direction nothing here changes.
+
     `x_window`, if given, skips every corner and edge lying entirely outside that x-range (the
     far parts of a mirror-padded solid, whose growth would be cropped away anyway).
     """
@@ -341,6 +351,14 @@ def _offset_named_facets(
         if math.hypot(point[0] - v[0], point[1] - v[1]) > 1.5 * (d1 + d2):
             return [(p1, label1), (p2, label2)]
         return [(point, label2)]
+
+    def exact_mitre(
+        v: tuple[float, float], n1: tuple[float, float], d1: float, n2: tuple[float, float], d2: float, label2: str
+    ) -> tuple[tuple[float, float], str]:
+        """Where offset lines n1@d1 and n2@d2 (both measured from `v`) cross, however far out."""
+        (a, b), (c, d) = n1, n2
+        det = a * d - b * c
+        return (v[0] + (d1 * d - b * d2) / det, v[1] + (a * d2 - c * d1) / det), label2
 
     def between_ccw(angle: float, lo: float, hi: float) -> bool:
         # Same tolerance as `classify`: an edge whose normal is only a hair (float noise, e.g.
@@ -448,10 +466,53 @@ def _offset_named_facets(
         # ... and either corner of a riser, which is part of its terraces' facet, not a break in it.
         passable = [passable[i] or riser[i - 1] or riser[i] for i in range(n)]
 
+        # Overhang corners (see the docstring): "start" where a growing edge sits on top of a static
+        # sidewall - the inverted facet nucleates there - and "foot" where an inverted facet already
+        # meets one. The sidewall is on the left of the crystal (normal (-1, 0), leaving the corner
+        # downwards) or on its right (normal (1, 0), arriving at it from below); `grower` is the
+        # other edge. Neither corner lets a bound through: the sidewall's line must not stop the
+        # crystal spreading past it.
+        inverted = {("left" if nx < 0 else "right"): (nx, ny, d, label, ang) for nx, ny, d, label, ang in named if label == "sp_inv"}
+        overhang: list[str | None] = [None] * n
+        overhang_side: list[str] = [""] * n
+        grower = [0] * n
+        for i in range(n):
+            for side, edge, wall, sx in (("left", (i - 1) % n, i, -1.0), ("right", i, (i - 1) % n, 1.0)):
+                wx, wy = normals[wall]
+                if side not in inverted or dists[wall] > 0 or riser[wall] or abs(wx - sx) > _FACET_SNAP_TOL or abs(wy) > _FACET_SNAP_TOL:
+                    continue
+                if not active[edge] or dists[edge] <= 0 or riser[edge]:
+                    continue
+                (ex, ey), (ix, iy) = normals[edge], inverted[side][:2]
+                if abs(ex - ix) < _FACET_SNAP_TOL and abs(ey - iy) < _FACET_SNAP_TOL:
+                    overhang[i] = "foot"
+                elif ex * sx >= -1e-9 and ey >= -1e-9:
+                    overhang[i] = "start"
+                else:
+                    continue
+                overhang_side[i], grower[i], passable[i] = side, edge, False
+                break
+
         chains: list[list[tuple[float, float, float, str]]] = []
         for i in range(n):
             n_in, n_out = normals[i - 1], normals[i]
             chain = [(n_in[0], n_in[1], dists[i - 1], labels[i - 1])]
+            if overhang[i] == "start":
+                # Growing edge -> any facet nucleating on its way round -> inverted facet -> sidewall,
+                # in traversal order: the sidewall comes last on the left, first on the right.
+                inx, iny, ind, inl, ang_inv = inverted[overhang_side[i]]
+                ex, ey = normals[grower[i]]
+                ang_e = math.atan2(ey, ex)
+                lo, hi = (ang_e, ang_inv) if overhang_side[i] == "left" else (ang_inv, ang_e)
+                extras = sorted(
+                    ((nx, ny, d, label) for nx, ny, d, label, ang in named if label != "sp_inv" and between_ccw(ang, lo, hi)),
+                    key=lambda e: (math.atan2(e[1], e[0]) - lo) % (2 * math.pi),
+                )
+                inserted = [*extras, (inx, iny, ind, inl)] if overhang_side[i] == "left" else [(inx, iny, ind, inl), *extras]
+                chain.extend(inserted)
+                chain.append((n_out[0], n_out[1], dists[i], labels[i]))
+                chains.append(chain)
+                continue
             if convex_at[i] and active[i - 1] and active[i] and not (riser[i - 1] or riser[i]):
                 ang_in = math.atan2(n_in[1], n_in[0])
                 ang_out = math.atan2(n_out[1], n_out[0])
@@ -535,14 +596,18 @@ def _offset_named_facets(
             p_out = (v[0] + n_out[0] * d_out, v[1] + n_out[1] * d_out)
 
             chain = chains[i]
-            mitre_points = [
-                tagged
-                for (nx1, ny1, d1, l1), (nx2, ny2, d2, l2) in zip(chain, chain[1:])
-                for tagged in mitre_or_bevel(v, (nx1, ny1), d1, l1, (nx2, ny2), d2, l2)
-            ]
-            if not convex_at[i] and len(mitre_points) != 1:
+            pairs = list(zip(chain, chain[1:]))
+            # At an overhang corner, the inverted facet meets the sidewall at its foot, exactly.
+            wall_pair = (len(pairs) - 1 if overhang_side[i] == "left" else 0) if overhang[i] else None
+            mitre_points = []
+            for k, ((nx1, ny1, d1, l1), (nx2, ny2, d2, l2)) in enumerate(pairs):
+                if k == wall_pair:
+                    mitre_points.append(exact_mitre(v, (nx1, ny1), d1, (nx2, ny2), d2, l2))
+                else:
+                    mitre_points.extend(mitre_or_bevel(v, (nx1, ny1), d1, l1, (nx2, ny2), d2, l2))
+            if not convex_at[i] and not overhang[i] and len(mitre_points) != 1:
                 continue  # concave corner whose mitre lands too far out: the two edge strips suffice
-            planes = bounds_around(i - 1, i)
+            planes = bounds_around(grower[i], grower[i]) if overhang[i] else bounds_around(i - 1, i)
             fan = [(p_in, lbl_in), *mitre_points, (p_out, lbl_out)]
             for (p_a, label_a), (p_b, _label_b) in zip(fan, fan[1:]):
                 piece = clipped([v, p_a, p_b], planes)
@@ -1058,6 +1123,8 @@ class Geometry:
         material_sp: str | None = None,
         provenance: LayerProvenance | None = None,
         max_substep_nm: float = 10.0,
+        rate_sp_inv: float = 0.0,
+        material_sp_inv: str | None = None,
     ) -> None:
         """Faceted growth: add `material` by advancing three crystal-plane families - c-plane
         {0001} (`rate_c`), m-plane {10-10} sidewalls (`rate_m`), and semi-polar facets at
@@ -1102,13 +1169,23 @@ class Geometry:
         where a new facet nucleates between two different families is split at the nucleation
         point, not blended - there is no in-between composition at a sub-nm sharp edge).
 
+        `rate_sp_inv` adds a fourth family, the inverted semi-polar facets ({10-1-1}: same angle
+        from the c-axis as the SP ones, facing down and out), with `material_sp_inv` as its
+        override. At 0 (the default) nothing changes. Above 0, a crystal whose sidewalls don't grow
+        (rate_m = 0, or not a seed material) is no longer held inside their lines: it spreads past
+        them with an inverted facet as its underside, whose foot slides down the bare sidewall as
+        it advances - a shell nucleating on a nanowire's tip and creeping down it, with no m-plane
+        growth on the wire itself (see `_offset_named_facets`). A shell grown that way ends as a
+        hexagon around the tip: c-plane top, SP facets, inverted SP facets, and an m-plane at its
+        widest only if rate_m > 0.
+
         `seed_materials` enables SAG selectivity (same semantics as `deposit_epitaxial`).
 
         `provenance`, if given, is attached as-is to every `Layer` this call creates (see
         `LayerProvenance`) - including each per-family split, when `material_c`/`material_m`/
-        `material_sp` produce more than one. This method never reads it back.
+        `material_sp`/`material_sp_inv` produce more than one. This method never reads it back.
         """
-        max_rate = max(rate_c, rate_m, rate_sp)
+        max_rate = max(rate_c, rate_m, rate_sp, rate_sp_inv)
         if thickness_nm <= 0 or max_rate <= 0 or not self.layers:
             return
         if seed_materials and not any(
@@ -1126,6 +1203,8 @@ class Geometry:
         # substep's film is tagged so the next one keeps growing on it whatever `seed_materials`
         # says, then the substeps are merged back into one Layer per material.
         families = {"c": material_c or material, "m": material_m or material, "sp": material_sp or material}
+        if rate_sp_inv > 0:
+            families["sp_inv"] = material_sp_inv or material
         tags = {m: f"<growing>{m}" for m in set(families.values())}
         seeds = [*seed_materials, *tags.values()] if seed_materials else None
         n = max(1, math.ceil(max_rate * thickness_nm / max_substep_nm))
@@ -1133,7 +1212,7 @@ class Geometry:
         for _ in range(n):
             self._deposit_faceted_once(
                 thickness_nm / n, rate_c, rate_m, rate_sp, semi_polar_angle_deg, seeds,
-                {family: tags[m] for family, m in families.items()},
+                {family: tags[m] for family, m in families.items()}, rate_sp_inv,
             )
         grown = self.layers[start:]
         del self.layers[start:]
@@ -1155,9 +1234,10 @@ class Geometry:
         semi_polar_angle_deg: float,
         seed_materials: list[str] | None,
         materials_by_family: dict[str, str],
+        rate_sp_inv: float = 0.0,
     ) -> None:
         """One single-offset substep of `deposit_faceted`, appending one Layer per material in
-        `materials_by_family` (keyed "c"/"m"/"sp")."""
+        `materials_by_family` (keyed "c"/"m"/"sp", plus "sp_inv" when `rate_sp_inv` > 0)."""
         solid = self.solid()
         if solid.is_empty:
             return
@@ -1169,7 +1249,7 @@ class Geometry:
         # Always grow from the whole (padded) solid, so the domain edges stay symmetry boundaries;
         # SAG only decides which of its exposed edges are allowed to move - an edge made of a
         # non-seed material (a mask, a cap) is pinned like a rate-0 facet.
-        reach = t * max(rate_c, rate_m, rate_sp) * 4 + 1.0
+        reach = t * max(rate_c, rate_m, rate_sp, rate_sp_inv) * 4 + 1.0
         real = self._pad(solid)
         # The growth front, trimmed of sub-angstrom bumps (see `_offset_named_facets` for the
         # steps between terraces). Trim-only - intersected with the solid - so it never sits above
@@ -1189,6 +1269,13 @@ class Geometry:
             (math.sin(theta), math.cos(theta), rate_sp * t, "sp"),
             (-math.sin(theta), math.cos(theta), rate_sp * t, "sp"),
         ]
+        if rate_sp_inv > 0:
+            # Only named when growing: as a pinned facet it would bound its neighbours, changing
+            # every growth that never asked for it.
+            named_directions += [
+                (math.sin(theta), -math.cos(theta), rate_sp_inv * t, "sp_inv"),
+                (-math.sin(theta), -math.cos(theta), rate_sp_inv * t, "sp_inv"),
+            ]
         pieces_by_family = _offset_named_facets(
             padded, named_directions, edge_active, x_window=(-reach, self.domain_width_nm + reach)
         )

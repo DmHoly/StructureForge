@@ -221,3 +221,25 @@ def test_mqw_barriers_on_a_sag_nanowire_have_no_internal_seams(recipes):
     final = simulate(Geometry.substrate("GaN", domain_width_nm=500, thickness_nm=50), steps, materials, recipes)[-1]
     for layer in final.layers:
         assert _slit_edges(layer.polygon) == [], layer.material
+
+
+def test_faceted_growth_step_with_inverted_facets_grows_a_shell_past_the_sidewalls(materials, recipes):
+    geometry = Geometry(domain_width_nm=300)
+    geometry.layers.append(Layer(material="GaN", polygon=box(100, 0, 200, 600)))
+    step = FacetedGrowth(
+        name="Coquille",
+        material="InGaN",
+        thickness=Length.nm(50),
+        rate_c=0.5,
+        rate_m=0.0,
+        rate_sp=0.5,
+        rate_sp_inv=0.5,
+        semi_polar_angle_deg=45,
+        material_sp_inv="GaN",
+    )
+    frames = simulate(geometry, [step], materials, recipes)
+
+    layers = frames[-1].layers[1:]
+    under = next(layer for layer in layers if layer.material == "GaN")  # the inverted facets' share
+    assert under.polygon.bounds[0] < 100 and under.polygon.bounds[1] < 600
+    assert layers[0].provenance.parameters["rate_sp_inv"].value == 0.5

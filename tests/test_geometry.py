@@ -647,3 +647,71 @@ def test_faceted_growth_on_an_etched_floor_with_angstrom_terraces_keeps_a_flat_t
     top = g.solid().intersection(box(0, 100, 400, 200))
     lowest_of_top = min(y for x, y in top.exterior.coords if 160 < x < 240)
     assert lowest_of_top > top.bounds[3] - 0.5
+
+
+def _chamfered_wire(angle_deg, half=50.0, top_half=30.0, height=600.0, cx=150.0):
+    """A free-standing nanowire: vertical m-plane sidewalls up to `height`, then a semi-polar
+    chamfer at `angle_deg` from the c-axis on each side, up to a flat c-plane top."""
+    rise = (half - top_half) * math.tan(math.radians(angle_deg))
+    g = Geometry(domain_width_nm=2 * cx)
+    g.layers.append(Layer(material="GaN", polygon=Polygon([
+        (cx - half, 0), (cx + half, 0), (cx + half, height),
+        (cx + top_half, height + rise), (cx - top_half, height + rise), (cx - half, height),
+    ])))
+    return g
+
+
+def test_faceted_growth_with_pinned_sidewalls_stays_inside_their_lines_without_inverted_facets():
+    """rate_sp_inv left at 0 (the default): a rate-0 m-plane still bounds the SP facets above it,
+    so nothing grows past the wire's sidewalls."""
+    g = _chamfered_wire(62)
+    g.deposit_faceted("InGaN", 100, rate_c=0.3, rate_m=0.0, rate_sp=0.6, semi_polar_angle_deg=62)
+    film = g.layers[-1].polygon
+    assert film.bounds[0] == pytest.approx(100.0)
+    assert film.bounds[2] == pytest.approx(200.0)
+
+
+def test_faceted_growth_inverted_facets_grow_a_shell_down_from_the_tip():
+    """With rate_sp_inv > 0 the shell spreads past the bare (rate-0) sidewalls, with an inverted
+    {10-1-1} facet as its underside: a hexagon around the tip, whose widest point is where the SP
+    and inverted SP fronts meet and whose foot has slid rate_sp_inv * t / cos(theta) down the
+    sidewall - steeper than `mitre_or_bevel`'s limit at 62 deg, so it must be mitred exactly."""
+    from shapely.affinity import scale
+
+    theta = math.radians(62)
+    g = _chamfered_wire(62)
+    g.deposit_faceted("InGaN", 100, rate_c=0.3, rate_m=0.0, rate_sp=0.6, rate_sp_inv=0.6, semi_polar_angle_deg=62)
+
+    film = g.layers[-1].polygon
+    assert film.geom_type == "Polygon" and not film.interiors
+    foot = 600 - 0.6 * 100 / math.cos(theta)
+    assert film.bounds[1] == pytest.approx(foot, abs=0.01)
+    assert film.bounds[0] == pytest.approx(100 - (0.6 + 0.6) * 100 / (2 * math.sin(theta)), abs=0.01)
+    assert film.bounds[3] == pytest.approx(600 + 20 * math.tan(theta) + 0.3 * 100, abs=0.01)
+    # c top, SP, inverted SP on each side, and the two feet on the wire: nothing else
+    assert len(film.exterior.coords) - 1 == 10
+    # the sidewall below the foot stays bare
+    assert film.intersection(box(90, 0, 210, foot - 0.1)).area == pytest.approx(0.0, abs=1e-6)
+    solid = g.solid()
+    assert solid.symmetric_difference(scale(solid, xfact=-1, origin=(150, 0))).area < 1e-3
+
+
+def test_faceted_growth_inverted_facets_overhang_a_non_seed_sidewall():
+    """A cap flush with a wire's sidewalls, grown seeded on itself only: the wire's GaN sidewall
+    doesn't grow (not a seed), so the cap's own m-plane spreads past it with an inverted facet
+    underneath, whose foot slides down that sidewall."""
+    g = Geometry(domain_width_nm=300)
+    g.layers.append(Layer(material="GaN", polygon=box(100, 0, 200, 600)))
+    g.layers.append(Layer(material="InGaN", polygon=box(100, 600, 200, 650)))
+    g.deposit_faceted(
+        "InGaN", 50, rate_c=0.5, rate_m=0.5, rate_sp=0.5, rate_sp_inv=0.5,
+        semi_polar_angle_deg=45, seed_materials=["InGaN"],
+    )
+
+    film = g.layers[-1].polygon
+    s = math.sin(math.radians(45))
+    assert film.bounds[0] == pytest.approx(75.0, abs=0.01)
+    assert film.bounds[1] == pytest.approx(600 - 25 / s, abs=0.01)
+    vertex_y = 600 - 25 * (1 - s) / s
+    assert Point(75.0, vertex_y).distance(film) < 0.01
+    assert not film.contains(Point(80.0, vertex_y - 15))  # air under the overhang

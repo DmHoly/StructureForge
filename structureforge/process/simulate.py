@@ -136,7 +136,7 @@ def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, re
         )
     elif isinstance(step, FacetedGrowth):
         materials.get(step.material)
-        for override in (step.material_c, step.material_m, step.material_sp):
+        for override in (step.material_c, step.material_m, step.material_sp, step.material_sp_inv):
             if override is not None:
                 materials.get(override)
         provenance = LayerProvenance(
@@ -147,6 +147,7 @@ def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, re
                 "rate_c": Traced.literal(step.rate_c),
                 "rate_m": Traced.literal(step.rate_m),
                 "rate_sp": Traced.literal(step.rate_sp),
+                **({"rate_sp_inv": Traced.literal(step.rate_sp_inv)} if step.rate_sp_inv else {}),
                 "semi_polar_angle_deg": Traced.literal(step.semi_polar_angle_deg),
                 "seed_materials": Traced.literal(list(step.seed_materials)),
             },
@@ -163,6 +164,8 @@ def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, re
             material_m=step.material_m,
             material_sp=step.material_sp,
             provenance=provenance,
+            rate_sp_inv=step.rate_sp_inv,
+            material_sp_inv=step.material_sp_inv,
         )
     elif isinstance(step, FacetEnvelope):
         materials.get(step.material)
