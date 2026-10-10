@@ -49,7 +49,7 @@ frames = simulate(geometry, steps, materials, recipes)   # une Frame par etape +
 save_svg("trench.svg", frames[-1], {m.name: m.color for m in materials})
 ```
 
-Les 13 scripts de `examples/` sont exécutables directement (`python examples/<script>.py`) et
+Les 14 scripts de `examples/` sont exécutables directement (`python examples/<script>.py`) et
 écrivent leur(s) SVG dans `examples/output/` (ou à côté du script pour les plus anciens). Trois
 groupes :
 
@@ -64,6 +64,7 @@ groupes :
 | `nanowire_semipolar_tip.py` | Nanofil GaN à croissance sélective, gravé en pilier puis terminé par une pointe à facettes semi-polaires {1-101} - un "V-pit à l'envers", les mêmes plans sur un mesa convexe au lieu d'une cavité concave - avant que la croissance ne reprenne à plat sur le plan c rétréci : puits quantique, capot, contact ITO. |
 | `nanowire_axial.py` | Un seul nanofil III-N **axial** : tampon AlN, tige n-GaN, puits quantiques multiples InGaN/GaN, blocage d'électrons AlGaN, segment p-GaN puis contact Ni/Au, tous empilés le long de l'axe du fil - obtenu, comme les deux exemples précédents, en faisant croître tout l'empilement à plat puis en gravant un seul pilier au travers, pas par une vraie croissance sélective localisée dans une ouverture de masque, que ce moteur ne modélise pas ; ses deux premiers segments utilisent une épaisseur **dérivée** (voir [Comment une épaisseur est atteinte](#comment-une-épaisseur-est-atteinte--lengthderivation)). |
 | `epitaxial_growth_sag.py` | Croissance sélective (SAG) III-N sur les trois orientations en une seule fois : plan C dans des ouvertures de masque SiO2 (homo- et hétéro-épitaxie), coque plan M sur les flancs d'un pilier GaN démasqué, et film semi-polaire à 32° sur un template GaN nu - via `EpitaxialGrowth.seed_materials`/`orientation`/`angle_deg`. |
+| `selective_etch_pillars.py` | Révélation du sommet d'un pilier GaN isolé par gravure sélective : trois formes de pilier (pointu, trapèze, pyramide aplatie), remplissage SiO2 conforme, CMP, puis gravure sélective de l'oxyde (recette sur mesure, GaN quasi inerte) dont la profondeur est calculée pour dégager le même sommet quelle que soit la forme. Sortie : grille formes x étapes. |
 | `derived_gan_growth.py` | La même épaisseur de GaN atteinte de trois façons différentes - valeur littérale, vitesse constante x durée, vitesse Arrhenius dépendante de la température - avec la dérivation utilisée dans une vraie étape simulée. |
 | `export_to_follow.py` | Simule le flow STI puis committe la structure finale et l'historique de process comme une expérience Follow (nécessite l'extra `[follow]`). |
 
