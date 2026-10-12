@@ -1,10 +1,15 @@
 """Applies a `ProcessStep` list to a starting `Geometry` and captures one `Frame` per step, so a
 caller (GUI, report, test) can scrub through the process history instead of only seeing the final
 result - which is exactly what the multi-view/zoom GUI needs a timeline for.
+
+`SimulationCache` is for a caller that resubmits the same flow with small edits (the GUI, on
+every change): since a frame is a complete snapshot of the stack, a run that shares its first
+steps with an earlier one restarts from that earlier run's frame and replays only the rest.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from ..core.materials import MaterialLibrary
@@ -71,18 +76,110 @@ def simulate(
     """Apply `steps` in order to `initial` (mutated in place) and return one `Frame` per step,
     plus an implicit frame 0 for the starting geometry.
     """
-    geometry = initial
-    frames = [Frame(0, "initial", "Structure de depart", _snapshot(geometry), geometry.domain_width_nm)]
+    frames = [Frame(0, "initial", "Structure de depart", _snapshot(initial), initial.domain_width_nm)]
+    return _simulate_from(initial, steps, materials, recipes, frames)
 
-    for i, step in enumerate(steps, start=1):
+
+def _simulate_from(
+    geometry: Geometry,
+    steps: list[ProcessStep],
+    materials: MaterialLibrary,
+    recipes: RecipeLibrary,
+    frames: list[Frame],
+) -> list[Frame]:
+    """Apply `steps` to `geometry` - the state after the last of `frames` - appending one `Frame`
+    per step to a copy of `frames`, numbered on from them."""
+    frames = list(frames)
+    first = len(frames)
+    for i, step in enumerate(steps, start=first):
         try:
             _apply(geometry, step, materials, recipes)
             geometry.compact()
         except Exception as exc:
             raise SimulationError(i, step, exc) from exc
         frames.append(Frame(i, step.kind, step.name, _snapshot(geometry), geometry.domain_width_nm))
-
     return frames
+
+
+def _restore(frame: Frame, floor_nm: float | None) -> Geometry:
+    """The live `Geometry` a frame was taken from, rebuilt from its snapshot: the frame's layers
+    are copied (their polygons are never mutated, only reassigned, so sharing them is safe - see
+    `_snapshot`), and `floor_nm` is what `Geometry.substrate` set, unchanged by every step (a
+    `Flip` mirrors about the stack's own mid-height)."""
+    geometry = Geometry(
+        frame.domain_width_nm,
+        [Layer(material=l.material, polygon=l.polygon, provenance=l.provenance) for l in frame.layers],
+    )
+    geometry.floor_nm = floor_nm
+    return geometry
+
+
+@dataclass
+class _CachedRun:
+    key: str
+    steps: list[dict]
+    frames: list[Frame]
+
+
+class SimulationCache:
+    """`simulate`, remembering the last `capacity` runs so that a flow sharing its first steps
+    with one of them is replayed only from the first step that differs - an edit to step 18 of
+    20 costs two steps, not twenty. The GUI resubmits the whole flow on every change, and its
+    users edit one step at a time, so nearly every run is such a prefix of an earlier one.
+
+    A run is keyed on everything else its frames depend on: the substrate, the material library
+    and the recipe library (custom recipes can change between two runs of the same flow). Steps
+    are compared by their serialized form, so two equal steps built separately match. The
+    snapshot a run resumes from is a `Frame`, which is immutable by construction (its layers'
+    polygons are never mutated in place), so resuming never disturbs the cached run.
+    """
+
+    def __init__(self, capacity: int = 8):
+        self.capacity = capacity
+        self._runs: list[_CachedRun] = []
+
+    @staticmethod
+    def _key(material: str, domain_width_nm: float, thickness_nm: float, materials: MaterialLibrary, recipes: RecipeLibrary) -> str:
+        digest = hashlib.sha256()
+        digest.update(repr((material, float(domain_width_nm), float(thickness_nm))).encode())
+        digest.update(materials.model_dump_json().encode())
+        digest.update(recipes.model_dump_json().encode())
+        return digest.hexdigest()
+
+    def simulate(
+        self,
+        material: str,
+        domain_width_nm: float,
+        thickness_nm: float,
+        steps: list[ProcessStep],
+        materials: MaterialLibrary,
+        recipes: RecipeLibrary,
+    ) -> list[Frame]:
+        """One `Frame` per step plus the initial one, exactly as `simulate` on
+        `Geometry.substrate(material, domain_width_nm, thickness_nm)` would return."""
+        key = self._key(material, domain_width_nm, thickness_nm, materials, recipes)
+        serialized = [step.model_dump(mode="json") for step in steps]
+        best, shared = None, 0
+        for run in self._runs:
+            if run.key != key:
+                continue
+            n = 0
+            for a, b in zip(run.steps, serialized):
+                if a != b:
+                    break
+                n += 1
+            if n > shared:
+                best, shared = run, n
+        if best is None:
+            geometry = Geometry.substrate(material, domain_width_nm, thickness_nm)
+            frames = simulate(geometry, steps, materials, recipes)
+        else:
+            geometry = _restore(best.frames[shared], -thickness_nm)
+            frames = _simulate_from(geometry, steps[shared:], materials, recipes, best.frames[: shared + 1])
+            self._runs.remove(best)
+        self._runs.insert(0, _CachedRun(key, serialized, frames))
+        del self._runs[self.capacity :]
+        return frames
 
 
 def _traced_length(length: Length) -> Traced:

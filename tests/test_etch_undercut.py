@@ -77,8 +77,12 @@ def test_isotropic_etch_undercut_is_round_and_symmetric():
     parts = sorted(oxide.geoms, key=lambda p: p.bounds[0])
     assert len(parts) == 2
     left, right = parts
-    # mirror-symmetric about the opening's centre, to well under a nanometre
-    assert left.bounds[2] == pytest.approx(500 - right.bounds[0], abs=0.6)
+    # mirror-symmetric about the opening's centre. The toe, where the arc meets the substrate at
+    # ~23 deg, is the most phase-sensitive point of a polygonal arc: a chord of up to ~12 deg
+    # (sagitta ~0.3 nm at r=51, left over from the 0.02 nm clean of the first, tiny rings) moves
+    # it by up to 0.3 / sin(23 deg) ~ 0.75 nm per side, and which side gets the long chord
+    # depends on the substep count. Up the front (y >= 1) the two sides agree to ~0.5 nm.
+    assert left.bounds[2] == pytest.approx(500 - right.bounds[0], abs=1.5)
     # the undercut front is one smooth curve: x recedes monotonically with height and, walking
     # up it, consecutive edges turn gently and always the same way - no zigzag, no scallops
     front = sorted((y, x) for x, y in left.exterior.coords if 149 < x < 200 and 0.5 < y < 49.5)
@@ -201,3 +205,42 @@ def test_faceted_growth_vicinal_sidewall_bounds_the_facet_nucleating_above_it():
     # 1 nm of m-plane advance, nothing poking further out (the strip used to reach ~4 nm past)
     assert film.bounds[0] > 150 - 1.0 - 0.3
     assert film.bounds[2] < 250 + 1.0 + 0.3
+
+
+def test_isotropic_etch_leaves_a_cavity_sealed_by_the_domain_edge_alone(materials):
+    """A pocket of air open to a domain edge is closed by its own mirror image (the edges are
+    symmetry boundaries): no etchant gets in, however wide the pocket, so its walls stay put.
+    The etch mirrors only a band past each edge - that band must grow to cover such a pocket,
+    or the crop opens it to the outside and its walls are eaten."""
+    g = Geometry(200.0, [
+        Layer("GaN", box(0, -50, 200, 0)),
+        Layer("SiO2", box(100, 0, 200, 10)),  # pillar: the cavity's right wall
+        Layer("SiO2", box(0, 10, 200, 30)),  # roof: the cavity (0..100, 0..10) is open at x=0 only
+    ])
+    g.floor_nm = -50.0
+    g.etch(EtchRecipe(name="iso", mode=EtchMode.isotropic, default_factor=1.0), 10, materials, steps=5)
+    floor, pillar, roof = (l.polygon for l in g.layers)
+    assert roof.bounds[3] == pytest.approx(20.0, abs=0.1)  # the top surface receded by the full depth...
+    assert roof.intersection(box(0, 10, 100, 20)).area == pytest.approx(100 * 10, abs=0.5)  # ...the ceiling did not
+    assert pillar.intersection(box(90, 0, 110, 10)).area == pytest.approx(10 * 10, abs=0.5)
+    assert floor.intersection(box(0, -5, 100, 0)).area == pytest.approx(100 * 5, abs=0.5)
+
+
+def test_isotropic_etch_does_not_tunnel_through_a_tapering_mask(materials):
+    """A slower layer that tapers to a thin edge against thick material of its own kind - a
+    wedge of nitride lying on the oxide, its thick end merging into a nitride block - has no
+    vertex of its own in its thin zone. The thin-part detection must still see it, so the
+    dilated air is stepped round it instead of tunnelling into the oxide beneath."""
+    nitride = box(0, 0, 50, 40).union(Polygon([(40, 5), (150, 5), (150, 15)]))  # 0.9..2.7 nm thick for x < 70
+    g = Geometry(200.0, [
+        Layer("Si", box(0, -50, 200, 0)),
+        Layer("SiO2", box(50, 0, 200, 5)),
+        Layer("Si3N4", nitride),
+    ])
+    g.floor_nm = -50.0
+    before = g.layers[1].polygon
+    recipe = EtchRecipe(name="oxide", mode=EtchMode.isotropic, selectivity_by_material={"SiO2": 1.0}, default_factor=0.0)
+    g.etch(recipe, 10, materials, steps=5)  # 2 nm per substep: the wedge is thinner than that for x < 62
+    lost = before.difference(g.layers[1].polygon)
+    assert lost.intersection(box(40, 0, 70, 5)).area == pytest.approx(0.0, abs=0.05)  # under the thin wedge
+    assert lost.intersection(box(140, 0, 200, 5)).area > 10 * 5 * 0.9  # the exposed oxide beyond it

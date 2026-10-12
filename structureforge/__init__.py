@@ -41,7 +41,7 @@ from .process.steps import (
     ProcessStep,
     ResistStrip,
 )
-from .process.simulate import Frame, SimulationError, simulate
+from .process.simulate import Frame, SimulationCache, SimulationError, simulate
 from .presentation.svg import frame_to_svg, save_svg
 
 __all__ = [
@@ -82,6 +82,7 @@ __all__ = [
     "GrowthOrientation",
     "Frame",
     "simulate",
+    "SimulationCache",
     "SimulationError",
     "frame_to_svg",
     "save_svg",

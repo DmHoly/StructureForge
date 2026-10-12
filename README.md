@@ -181,6 +181,7 @@ chaque appel plutôt que de réutiliser la même classe.
 | `Length` / `LengthDerivation` | Un paramètre numérique (épaisseur, profondeur, niveau cible) - littéral (`Length.nm(5)`) ou **dérivé** d'un petit arbre de process imbriqués (`Length.derived(...)`) expliquant *comment* la valeur a été atteinte. Voir [Comment une épaisseur est atteinte](#comment-une-épaisseur-est-atteinte--lengthderivation) plus bas. |
 | `Traced` / `LayerProvenance` | La même idée que `Length.derived(...)`, généralisée à **n'importe quel** paramètre de step (pas seulement une épaisseur) et attachée directement au `Layer` produit - une table ouverte `nom -> Traced` posée automatiquement par `simulate()` pour `EpitaxialGrowth`/`FacetedGrowth`. Voir [docs/layer-provenance.md](docs/layer-provenance.md). |
 | `simulate()` | Applique une liste de `ProcessStep` à une `Geometry` de départ, renvoie une `Frame` par étape (dont l'état initial) pour l'historique/le défilement. |
+| `SimulationCache` | `simulate()` avec mémoire des derniers runs : un flow qui partage ses premières étapes avec un run précédent repart de la `Frame` correspondante et ne rejoue que la suite - c'est ce que fait `/api/simulate`, donc modifier l'étape 18 d'un flow de 20 dans l'interface ne recalcule que 3 étapes. La clé tient compte du substrat, des matériaux et des recettes (une recette éditée invalide le cache). |
 
 ### L'exemple de sélectivité de la spec
 
@@ -263,13 +264,16 @@ documentée dans le code à l'endroit exact où elle s'applique :
   buffer/balayage est calculé sur la géométrie reflétée en x=0 et x=largeur puis recadré, pour
   éviter un arrondi/une érosion artificiels pile sur le bord. Garder le domaine assez large pour
   que les motifs d'intérêt n'y collent pas.
-- **La gravure sélective avance par sous-étapes.** Une sous-étape plus lente (masque, couche
-  d'arrêt), tant qu'elle est elle-même exposée à la surface, est temporairement "gonflée" vers le
-  haut le temps du calcul d'une autre sous-étape plus rapide - sinon, une fois plus fine qu'une
-  seule sous-étape de la gravure rapide, elle serait traversée d'un coup au lieu de protéger ce
-  qu'il y a dessous jusqu'à sa consommation complète. Le résultat retenu est toujours recalculé
-  contre les polygones réels (non gonflés), donc ce mécanisme ne fuit jamais dans le résultat - il
-  ne fait que borner jusqu'où une sous-étape peut aller.
+- **La gravure sélective avance par sous-étapes.** À chaque sous-étape, l'air courant est dilaté
+  de la portée de chaque facteur de vitesse présent, et chaque couche perd exactement son
+  intersection avec l'anneau de son propre facteur. Une couche plus lente (masque, couche d'arrêt)
+  n'est jamais traversée : si l'une de ses parties est plus fine que la portée d'une sous-étape, la
+  dilatation se fait en pas géodésiques recoupés à ce qui est franchissable, de sorte que l'air
+  contourne le masque sans le percer. Ce test de finesse est le seul moment où les couches lentes
+  entrent dans le calcul : il est fait une fois avec assez de marge pour rester valable sur
+  plusieurs sous-étapes (une couche ne peut que reculer), pas à chaque sous-étape. De même, le
+  reflet aux bords du domaine ne couvre qu'une bande aussi large que ce qu'une sous-étape peut
+  atteindre, pas deux copies entières de la structure.
 
 Le lift-off (matière déposée sur une résine, qui part avec elle) est une conséquence émergente de
 `Geometry.remove_floating_debris()` (appelé après `ResistStrip`) plutôt qu'un modèle physique

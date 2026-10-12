@@ -746,3 +746,35 @@ def test_faceted_growth_rejects_an_inverted_rate_below_the_engine_resolution():
     g.layers.append(Layer(material="GaN", polygon=box(350, 0, 450, 400)))
     with pytest.raises(ValueError, match="rate_sp_inv"):
         g.deposit_faceted("GaN", 300, rate_c=1, rate_m=0, rate_sp=0.25, rate_sp_inv=0.01, semi_polar_angle_deg=84)
+
+
+def test_directional_etch_consumes_a_slow_mask_at_its_own_rate(materials, recipes):
+    """Si3N4 etches at 2% of Si under KOH: 45 nm of Si is 0.9 nm of mask along the 54.7 deg beam,
+    i.e. 0.52 nm off every beam-lit flat top and 0.73 nm off a beam-lit face, a leeward face
+    untouched. The ring of such a slow factor is a few hundredths of a nm thick per substep -
+    thinner than the sliver filter's threshold - and used to be dropped as numerical noise every
+    substep, so a mask slower than ~2.5% was never consumed at all."""
+    from structureforge import Deposition, Etch, Length, Lithography, ResistStrip, simulate
+
+    g = Geometry.substrate("Si", domain_width_nm=200.0, thickness_nm=60)
+    simulate(
+        g,
+        [
+            Deposition(name="mask", material="Si3N4", recipe="CVD Conformal", thickness=Length.nm(20)),
+            Lithography(name="open", resist_material="Photoresist", thickness=Length.nm(5), openings=[(60.0, 140.0)]),
+            Etch(name="open mask", recipe="Anisotropic RIE", depth=Length.nm(20)),
+            ResistStrip(name="strip"),
+            Etch(name="koh", recipe="KOH Anisotropic Wet Etch", depth=Length.nm(45)),
+        ],
+        materials,
+        recipes,
+    )
+    nitride = next(l.polygon for l in g.layers if l.material == "Si3N4")
+    along = 45 * 0.02
+    left = min(nitride.geoms, key=lambda p: p.bounds[0])
+    right = max(nitride.geoms, key=lambda p: p.bounds[0])
+    top = 20 - along * math.cos(math.radians(54.7))
+    assert left.bounds[3] == pytest.approx(top, abs=0.02)
+    assert right.bounds[3] == pytest.approx(top, abs=0.02)
+    assert right.bounds[0] == pytest.approx(140 + along * math.sin(math.radians(54.7)), abs=0.02)
+    assert left.bounds[2] == pytest.approx(60.0, abs=1e-6)

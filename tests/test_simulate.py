@@ -4,7 +4,7 @@ from shapely.geometry import box
 from structureforge.core.materials import indium_gan
 from structureforge.core.units import Length
 from structureforge.geometry.engine import Geometry, Layer
-from structureforge.process.simulate import SimulationError, simulate
+from structureforge.process.simulate import SimulationCache, SimulationError, simulate
 from structureforge.process.steps import ChemicalStep, Deposition, Etch, FacetedGrowth, Flip, Lithography, ResistStrip
 
 
@@ -243,3 +243,103 @@ def test_faceted_growth_step_with_inverted_facets_grows_a_shell_past_the_sidewal
     under = next(layer for layer in layers if layer.material == "GaN")  # the inverted facets' share
     assert under.polygon.bounds[0] < 100 and under.polygon.bounds[1] < 600
     assert layers[0].provenance.parameters["rate_sp_inv"].value == 0.5
+
+
+# -- SimulationCache: replay only the steps that changed ---------------------------------------
+
+
+def _rings(frames):
+    return [[(l.material, l.polygon.wkt) for l in f.layers] for f in frames]
+
+
+def test_cache_returns_the_same_frames_as_a_fresh_simulation(materials, recipes):
+    cache = SimulationCache()
+    flow = _flow()
+    fresh = simulate(Geometry.substrate("Si", 100, 30), flow, materials, recipes)
+    cached = cache.simulate("Si", 100, 30, flow, materials, recipes)
+    assert _rings(cached) == _rings(fresh)
+    assert [f.step_index for f in cached] == [f.step_index for f in fresh]
+
+
+def test_cache_replays_only_from_the_first_changed_step(materials, recipes, monkeypatch):
+    import structureforge.process.simulate as sim
+
+    applied = []
+    real_apply = sim._apply
+    monkeypatch.setattr(sim, "_apply", lambda g, step, m, r: (applied.append(step.name), real_apply(g, step, m, r)))
+
+    cache = SimulationCache()
+    flow = _flow()
+    cache.simulate("Si", 100, 30, flow, materials, recipes)
+    assert applied == ["Oxyde", "Nettoyage", "Gravure"]
+
+    # the same flow again: nothing to replay
+    applied.clear()
+    again = cache.simulate("Si", 100, 30, list(flow), materials, recipes)
+    assert applied == []
+    assert len(again) == len(flow) + 1
+
+    # the last step edited: only it is replayed, from the frame after step 2 - and the result
+    # is what a fresh run of the edited flow gives
+    edited = flow[:2] + [Etch(name="Gravure", recipe="Anisotropic RIE", depth=Length.nm(15))]
+    applied.clear()
+    frames = cache.simulate("Si", 100, 30, edited, materials, recipes)
+    assert applied == ["Gravure"]
+    fresh = simulate(Geometry.substrate("Si", 100, 30), edited, materials, recipes)
+    assert _rings(frames) == _rings(fresh)
+    assert [f.step_index for f in frames] == [0, 1, 2, 3]
+
+    # a step appended: only it is replayed
+    longer = edited + [Deposition(name="Cap", material="Si3N4", recipe="ALD Conformal", thickness=Length.nm(5))]
+    applied.clear()
+    frames = cache.simulate("Si", 100, 30, longer, materials, recipes)
+    assert applied == ["Cap"]
+    assert _rings(frames) == _rings(simulate(Geometry.substrate("Si", 100, 30), longer, materials, recipes))
+
+    # the first step edited: everything is replayed
+    changed_first = [Deposition(name="Oxyde", material="SiO2", recipe="CVD Conformal", thickness=Length.nm(25))] + longer[1:]
+    applied.clear()
+    cache.simulate("Si", 100, 30, changed_first, materials, recipes)
+    assert applied == ["Oxyde", "Nettoyage", "Gravure", "Cap"]
+
+
+def test_cache_does_not_let_a_resumed_run_disturb_the_cached_frames(materials, recipes):
+    cache = SimulationCache()
+    flow = _flow()
+    first = cache.simulate("Si", 100, 30, flow, materials, recipes)
+    before = _rings(first)
+    cache.simulate("Si", 100, 30, flow[:2] + [Etch(name="Gravure", recipe="Anisotropic RIE", depth=Length.nm(15))], materials, recipes)
+    assert _rings(first) == before
+
+
+def test_cache_is_keyed_on_substrate_and_recipes(materials, recipes, monkeypatch):
+    import structureforge.process.simulate as sim
+    from structureforge.core.recipes import EtchMode, EtchRecipe
+
+    applied = []
+    real_apply = sim._apply
+    monkeypatch.setattr(sim, "_apply", lambda g, step, m, r: (applied.append(step.name), real_apply(g, step, m, r)))
+    cache = SimulationCache()
+    flow = _flow()
+    cache.simulate("Si", 100, 30, flow, materials, recipes)
+
+    applied.clear()
+    cache.simulate("Si", 120, 30, flow, materials, recipes)  # a wider domain: a different structure
+    assert len(applied) == 3
+
+    applied.clear()
+    faster = recipes.with_recipes(
+        etch=[EtchRecipe(name="Anisotropic RIE", mode=EtchMode.directional, selectivity_by_material={"Photoresist": 0.1}, default_factor=2.0)]
+    )
+    cache.simulate("Si", 100, 30, flow, materials, faster)  # an edited recipe: stale frames would be wrong
+    assert len(applied) == 3
+
+
+def test_cache_reports_a_failing_step_with_its_index_in_the_whole_flow(materials, recipes):
+    cache = SimulationCache()
+    flow = _flow()
+    cache.simulate("Si", 100, 30, flow, materials, recipes)
+    bad = flow + [Etch(name="Mauvaise", recipe="does-not-exist", depth=Length.nm(5))]
+    with pytest.raises(SimulationError) as excinfo:
+        cache.simulate("Si", 100, 30, bad, materials, recipes)
+    assert excinfo.value.step_index == 4

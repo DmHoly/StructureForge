@@ -21,7 +21,7 @@ from ..core.recipe_store import RecipeStore
 from ..core.recipes import DepositionRecipe, EtchRecipe, RecipeLibrary, default_recipes
 from ..core.units import Length
 from ..geometry.engine import Geometry
-from ..process.simulate import SimulationError, simulate
+from ..process.simulate import SimulationCache, SimulationError
 from ..process.steps import ProcessStep
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -78,6 +78,10 @@ def create_app(
         """
         return recipe_store.combined_with(base_recipes)
 
+    # The frontend resubmits the whole flow on every edit: replay only what changed (see
+    # `SimulationCache`). Keyed on the recipes too, so editing a recipe never serves stale frames.
+    cache = SimulationCache()
+
     app = FastAPI(title="StructureForge", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -131,11 +135,14 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        geometry = Geometry.substrate(substrate.material, substrate.domain_width.to_nm(), substrate.thickness.to_nm())
         try:
-            frames = simulate(geometry, steps, materials, current_recipes())
+            frames = cache.simulate(
+                substrate.material, substrate.domain_width.to_nm(), substrate.thickness.to_nm(), steps, materials, current_recipes()
+            )
         except SimulationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        geometry = Geometry(frames[-1].domain_width_nm, list(frames[-1].layers))
+        geometry.floor_nm = -substrate.thickness.to_nm()
         return geometry, frames
 
     @app.post("/api/simulate")

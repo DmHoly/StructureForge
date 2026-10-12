@@ -165,6 +165,117 @@ def _has_interior(geom: BaseGeometry) -> bool:
     return False
 
 
+def _polygonal(geom: BaseGeometry) -> BaseGeometry:
+    """Only the polygon parts of `geom`: a clip can leave stray lines/points (an edge lying
+    exactly on the clip rectangle) next to the real area."""
+    if isinstance(geom, (Polygon, MultiPolygon)) or geom.is_empty:
+        return geom
+    polys = [p for g in geom.geoms for p in (g.geoms if isinstance(g, MultiPolygon) else [g]) if isinstance(p, Polygon) and not p.is_empty]
+    if not polys:
+        return Polygon()
+    return polys[0] if len(polys) == 1 else MultiPolygon(polys)
+
+
+def _mitre_tips(eroded: BaseGeometry, d: float) -> np.ndarray:
+    """Where a mitre dilation of `eroded` by `d` can poke past the shape it was eroded from: at
+    every convex corner, the region between the two offset lines from the corner to their
+    mitre tip (or, past GEOS's default mitre limit of 5 offsets, to where the bevel cuts it),
+    as an array of polygons. The corners the erosion sharpened or created (the tip of a
+    tapering part) are where the dilation overshoots the original outline; a corner of the
+    original is restored exactly, and its quad just holds nothing. Corners turning by less
+    than `_MITRE_TIP_MIN_TURN` - the vertices of a buffer's arcs, mostly - have tips a few
+    percent of `d` past the offset edges, and are left out."""
+    quads = []
+    for part in (eroded.geoms if isinstance(eroded, MultiPolygon) else [eroded]):
+        if part.is_empty:
+            continue
+        part = orient(part, sign=1.0)  # exterior counter-clockwise, holes clockwise
+        for ring, sign in [(part.exterior, 1.0), *((hole, -1.0) for hole in part.interiors)]:
+            c = np.asarray(ring.coords)[:-1]
+            if len(c) < 3:
+                continue
+            a = c - np.roll(c, 1, axis=0)  # incoming edge
+            b = np.roll(c, -1, axis=0) - c  # outgoing edge
+            la, lb = np.hypot(a[:, 0], a[:, 1]), np.hypot(b[:, 0], b[:, 1])
+            ok = (la > 1e-12) & (lb > 1e-12)
+            a, b = a / np.maximum(la, 1e-300)[:, None], b / np.maximum(lb, 1e-300)[:, None]
+            cross = (a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0]) * sign
+            dot = a[:, 0] * b[:, 0] + a[:, 1] * b[:, 1]
+            turn = np.arctan2(np.abs(cross), dot)  # exterior angle at the corner
+            convex = ok & (cross > 0) & (turn >= _MITRE_TIP_MIN_TURN)
+            if not convex.any():
+                continue
+            # right-hand normals point out of the solid for both ring orientations
+            n1 = np.column_stack([a[:, 1], -a[:, 0]])[convex]
+            n2 = np.column_stack([b[:, 1], -b[:, 0]])[convex]
+            v, a, b = c[convex], a[convex], b[convex]
+            # The two offset lines meet d * tan(turn / 2) past their feet; GEOS bevels a mitre
+            # longer than 5 offsets, which that long a run along the offset lines still covers
+            # (a point 6 d from a foot is at least 5 d from the corner).
+            run = np.minimum(d * np.tan(turn[convex] / 2), 6.0 * d)[:, None]
+            foot1, foot2 = v + n1 * d, v + n2 * d
+            quads.append(np.stack([v, foot1, foot1 + a * run, foot2 - b * run, foot2, v], axis=1))
+    if not quads:
+        return np.array([], dtype=object)
+    return shapely.polygons(np.concatenate(quads))
+
+
+def _thin_area(blocked: BaseGeometry, r: float, window: tuple[float, float] | None = None) -> float:
+    """The area of the parts of `blocked` thinner than `r` (nm^2): what a morphological opening
+    by `r / 2` (mitre joins, so real corners survive it) fails to restore. An etch substep's air,
+    dilated by its reach, tunnels through such a part of a slower-etching layer as if it weren't
+    there - see `Geometry._reach_air`, the one caller.
+
+    Measured without the overlay `blocked - opened` would cost on two polygons sharing most of
+    their boundary: `blocked.area - opened.area`, plus the area of the opening outside `blocked`
+    - which only the mitre tips of the dilation produce, so only their quads (`_mitre_tips`)
+    that `blocked` doesn't cover are overlaid, a small geometry.
+
+    `window`, if given, is the x-range the measurement is restricted to: the parts of a
+    band-cropped mirror image near the crop cut are not real geometry. The restriction is a
+    plain rectangle clip of the measured shapes (area needs no valid topology), never an input
+    to the overlay.
+    """
+    if blocked.is_empty or r <= 0:
+        return 0.0
+    mitre = {"join_style": "mitre"}
+    with np.errstate(divide="ignore", invalid="ignore"):  # GEOS mitre on a degenerate segment - harmless
+        eroded = blocked.buffer(-r / 2, **mitre)
+        opened = eroded.buffer(r / 2, **mitre) if not eroded.is_empty else eroded
+    y0, y1 = blocked.bounds[1] - 1.0, blocked.bounds[3] + 1.0
+
+    def measured(geom: BaseGeometry) -> BaseGeometry:
+        if window is None or geom.is_empty:
+            return geom
+        return shapely.clip_by_rect(geom, window[0], y0, window[1], y1)
+
+    blocked_measured = measured(blocked)
+    if blocked_measured.is_empty:
+        return 0.0
+    if opened.is_empty:
+        return blocked_measured.area
+    area = blocked_measured.area - measured(opened).area
+    tips = _mitre_tips(eroded, r / 2)
+    if len(tips):
+        # Only a tip region not entirely inside `blocked` can hold overshoot: a predicate per
+        # quad against the prepared polygon (dilated by a hair, since a restored corner's tip
+        # lies exactly on the outline), and an overlay only of the (usually few) that fail.
+        within = blocked.buffer(_TOUCH_EPS, **mitre)
+        shapely.prepare(within)
+        poking = tips[~shapely.covers(within, tips)]
+        if len(poking):
+            # An exact mitre makes the two run ends coincide (to the last bit): buffer(0) turns
+            # such a degenerate quad into a clean triangle before the union.
+            try:
+                hood = _robust_union(list(shapely.buffer(poking, 0)))
+                # `_polygonal`: a quad edge lying along the opening leaves a line in the result
+                under = _polygonal(opened.intersection(hood))
+                overshoot = shapely.difference(under, blocked, grid_size=_COVER_GRID) if not under.is_empty else under
+            except shapely.errors.GEOSException:
+                overshoot = opened.buffer(0).difference(blocked.buffer(0))
+            area += measured(overshoot).area
+    return max(0.0, area)
+
 _ALLOY_NAME = re.compile(r"^(In|Al)\d+(?:\.\d+)?Ga\d+(?:\.\d+)?N$")
 _SEED_PROBE_DEPTH = 0.25  # nm - how far inside an exposed edge to look for the material it belongs to:
                           # deep enough to see past an etch's sub-angstrom residue film, far thinner
@@ -179,10 +290,13 @@ _UNION_GRID = 1e-4  # nm - snap grid for _robust_union's fallback
 _UNION_COVER_TOL = 1e-3  # nm^2 - how much of an input a union may leave out before it's redone, see _covering_union
 _COVER_GRID = 1e-6  # nm - snap grid that measures it
 _SPLIT_TOL = 0.05  # nm - a layer vertex this close to a solid edge splits that edge (covers _SIMPLIFY_TOL drift)
-_EDGE_SNAP = 1e-6  # nm - a vertex this close to a domain edge is put exactly on it, see Geometry._snap_edges
+_EDGE_SNAP = 1e-3  # nm - a vertex this close to a domain edge is put exactly on it, see Geometry._snap_edges:
+                   # boolean ops leave them 1e-5..1e-4 nm off, and no real feature is a picometre wide
 _GEODESIC_STEP = 0.25  # nm - an etch substep's reach is dilated in steps this long, see Geometry._reach_air
 _REACH_EPS = 0.03  # nm - the part of an etch substep's reach grown after cleaning, see Geometry._reach_air
 _ETCH_SMOOTH_MAX = 0.25  # nm - cap on how far an etched layer's exposed edge is straightened, see Geometry._smooth_exposed
+_GEODESIC_SIMPLIFY = 0.002  # nm - vertex-hygiene simplification between two geodesic steps, see Geometry._reach_air
+_MITRE_TIP_MIN_TURN = math.radians(15.0)  # a corner turning less is too flat for its mitre tip to matter, see _mitre_tips
 
 
 def seed_matches(material: str, seed_materials: list[str]) -> bool:
@@ -233,27 +347,42 @@ def sweep_union(geom: BaseGeometry, vector: tuple[float, float]) -> BaseGeometry
     "directional" deposition/etch actually mean: a uniform offset in one direction, rather than
     every direction like `.buffer()`.
 
-    Computed directly rather than by sampling many intermediate translations: the union of `geom`,
-    `geom` translated by `vector`, and - for every edge of every ring of every part of `geom` - the
-    parallelogram that edge sweeps out along `vector`, is exactly the swept region (sweeping a
-    rigid shape along a straight line traces out its own two end positions plus, along the way,
-    the quad each edge carries with it). Besides being exact rather than an approximation, this
-    sidesteps a real GEOS robustness trap the earlier sampled version had: many translated copies
-    at regular, exactly-aligned offsets is a textbook way to trigger a spurious "side location
-    conflict" TopologyException in `unary_union` (axis-parallel edges landing exactly on top of
-    each other at various samples) - a handful of edge-quads doesn't have that failure mode.
+    Computed directly rather than by sampling many intermediate translations: the union of `geom`
+    and, for every edge of every ring of every part of `geom` whose outward normal has a positive
+    component along `vector`, the parallelogram that edge sweeps out along `vector`, is exactly
+    the swept region. A point of the sweep that isn't in `geom` is reached from `geom` along
+    `vector`, so the straight path to it leaves `geom` somewhere - through an edge facing along
+    `vector` (at a vertex, one of the two edges meeting there does) - and lies in that edge's
+    parallelogram; edges facing away from, or parallel to, `vector` add nothing but cost: their
+    (possibly degenerate, zero-area) quads are left out. Besides being exact rather than an
+    approximation, this sidesteps a real GEOS robustness trap the earlier sampled version had:
+    many translated copies at regular, exactly-aligned offsets is a textbook way to trigger a
+    spurious "side location conflict" TopologyException in `unary_union` (axis-parallel edges
+    landing exactly on top of each other at various samples) - a handful of edge-quads doesn't
+    have that failure mode.
     """
     if geom.is_empty or (vector[0] == 0 and vector[1] == 0):
         return geom
-    parts = list(geom.geoms) if isinstance(geom, MultiPolygon) else [geom]
-    pieces = [geom, translate(geom, vector[0], vector[1])]
-    for part in parts:
+    vx, vy = vector
+    quads = []
+    for part in (geom.geoms if isinstance(geom, MultiPolygon) else [geom]):
+        if part.is_empty:
+            continue
+        # `orient` makes the exterior counter-clockwise and the holes clockwise, so the right-hand
+        # normal (dy, -dx) of every edge points out of the solid for both.
+        part = orient(part, sign=1.0)
         for ring in [part.exterior, *part.interiors]:
-            coords = list(ring.coords)
-            for (x1, y1), (x2, y2) in zip(coords, coords[1:]):
-                pieces.append(
-                    Polygon([(x1, y1), (x2, y2), (x2 + vector[0], y2 + vector[1]), (x1 + vector[0], y1 + vector[1])])
-                )
+            c = np.asarray(ring.coords)
+            p1, p2 = c[:-1], c[1:]
+            d = p2 - p1
+            facing = d[:, 1] * vx - d[:, 0] * vy > 1e-12
+            if not facing.any():
+                continue
+            a, b = p1[facing], p2[facing]
+            quads.append(np.stack([a, b, b + vector, a + vector, a], axis=1))
+    if not quads:
+        return geom
+    pieces = [geom, *shapely.polygons(np.concatenate(quads))]
     return _clean(unary_union(pieces))
 
 
@@ -852,13 +981,31 @@ class Geometry:
 
         return shapely.transform(geom, snap)
 
-    def _mirror_pad(self, geom: BaseGeometry) -> BaseGeometry:
+    def _mirror_pad(self, geom: BaseGeometry, band: float | None = None, bulk: bool = False) -> BaseGeometry:
+        """`geom` unioned with its mirror images across `x=0` and `x=domain_width_nm` (see the
+        class docstring: domain edges are symmetry boundaries). `band`, if given, keeps only the
+        first `band` nm of each mirror image - enough for any operation whose reach from the domain
+        is below it, at a fraction of the vertex count of the two full copies. `bulk` adds the
+        wafer bulk under the whole padded width in the same union (see `_bulk_pad`)."""
         if geom.is_empty:
             return geom
         geom = self._snap_edges(geom)
-        left = scale(geom, xfact=-1, yfact=1, origin=(0.0, 0.0))
-        right = scale(geom, xfact=-1, yfact=1, origin=(self.domain_width_nm, 0.0))
-        return _clean(unary_union([geom, left, right]))
+        w = self.domain_width_nm
+        if band is not None and band < w:
+            y0, y1 = geom.bounds[1] - 1.0, geom.bounds[3] + 1.0
+            src_left = _polygonal(geom.intersection(box(0.0, y0, band, y1)))
+            src_right = _polygonal(geom.intersection(box(w - band, y0, w, y1)))
+        else:
+            band = w
+            src_left = src_right = geom
+        pieces = [
+            geom,
+            scale(src_left, xfact=-1, yfact=1, origin=(0.0, 0.0)),
+            scale(src_right, xfact=-1, yfact=1, origin=(w, 0.0)),
+        ]
+        if bulk and self.floor_nm is not None:
+            pieces.append(box(-band, self.floor_nm - _BULK_MARGIN, w + band, self.floor_nm))
+        return _clean(_robust_union(pieces))
 
     def _bulk_pad(self, geom: BaseGeometry) -> BaseGeometry:
         """Extend `geom` far downward past `floor_nm`, so a buffer/sweep never sees the wafer's
@@ -971,7 +1118,9 @@ class Geometry:
     def _clamp_floor(self, y: float) -> float:
         return y if self.floor_nm is None else max(y, self.floor_nm)
 
-    def _shadow(self, solid: BaseGeometry, angle_deg: float, y_min: float, y_max: float) -> BaseGeometry:
+    def _shadow(
+        self, solid: BaseGeometry, angle_deg: float, y_min: float, y_max: float, mirrored: BaseGeometry | None = None
+    ) -> BaseGeometry:
         """The region shadowed by `solid` for a beam tilted `angle_deg`: everywhere "behind"
         existing material, continuing in the beam's own forward direction, out to a length that
         safely spans the current structure. A directional process (deposition or etch) can't
@@ -984,10 +1133,13 @@ class Geometry:
         "wafer backside" boundary to worry about here the way `deposit`/`etch` need to - and
         skipping it keeps this sweep's coordinates at the structure's own scale rather than the
         bulk pad's ~1e7 nm extension, which paired badly with `_UNION_GRID`'s precision.
+        `mirrored`: the mirror-padded `solid`, when the caller already has it (a band-cropped one
+        is fine as long as its band covers the shadow's horizontal reach, see `_etch_band`; so is
+        a bulk-padded one - the bulk only ever shadows what lies below the wafer).
         """
         if solid.is_empty:
             return solid
-        padded = self._mirror_pad(solid)
+        padded = self._mirror_pad(solid) if mirrored is None else mirrored
         span = (y_max - y_min) + self.domain_width_nm + _MARGIN
         dx, dy = beam_vector(angle_deg, span)
         swept = sweep_union(padded, (dx, dy))
@@ -1488,6 +1640,14 @@ class Geometry:
         reaches (round the mask's edge, never through it), and the material beside a slower
         layer keeps receding even once that layer is exposed.
 
+        A substep works on the solid mirrored only within a band past each domain edge, as wide
+        as anything the substep can reach there (see `_etch_band`), and on the plain dilation of
+        the air whenever no slower layer is thin enough to be tunnelled through - a layer only
+        ever loses its own intersection with the ring, so clipping the ring to what the air can
+        pass through changes nothing unless the dilation has to be done in geodesic steps. Each
+        factor's slower layers are probed for thin parts once, with enough margin to hold for as
+        many substeps as their own recession allows (see `_tunnel_policy`), not every substep.
+
         Afterwards, sub-angstrom films left by the final substep are removed, and the exposed
         edges of slowly-etched layers are straightened to within their own step height (see the
         end of this method and `_smooth_exposed`).
@@ -1497,62 +1657,70 @@ class Geometry:
         if steps is None:
             steps = min(40, max(10, round(depth_nm / 2)))
         substep = depth_nm / steps
+        directional = recipe.mode is EtchMode.directional
+        w = self.domain_width_nm
+        factors = [recipe.factor_for(materials.get(l.material)) for l in self.layers]
+        # factor -> (substep index its verdict holds until, geodesic step of `_reach_air`, probe hint)
+        tunnel: dict[float, tuple[int, float, int]] = {}
 
-        for _ in range(steps):
-            solid = self.solid()
+        solid = self.solid()
+        for k in range(steps):
             if solid.is_empty:
                 break
+            live = [i for i, l in enumerate(self.layers) if not l.polygon.is_empty]
+            distinct_factors = sorted({factors[i] for i in live})
+            if not distinct_factors or distinct_factors[-1] <= 0:
+                break
             y_min, y_max = solid.bounds[1], solid.bounds[3]
-            # Padded (mirrored + bulk-extended) once per substep: the wafer floor and the domain's
-            # left/right edges are real edges of the raw `solid` polygon but not real surface, so
-            # neither the air nor the shadow (directional mode only) may see them.
-            padded_plain = self._pad(solid)
-            shadow = (
-                self._shadow(solid, recipe.angle_deg, y_min, y_max)
-                if recipe.mode is EtchMode.directional
-                else None
-            )
-
-            factor_by_index: dict[int, float] = {}
-            for i, layer in enumerate(self.layers):
-                if layer.polygon.is_empty:
-                    continue
-                factor_by_index[i] = recipe.factor_for(materials.get(layer.material))
-            distinct_factors = sorted(set(factor_by_index.values()))
+            reach_max = substep * distinct_factors[-1]
+            # Padded (mirrored within a band + bulk-extended) once per substep: the wafer floor
+            # and the domain's left/right edges are real edges of the raw `solid` polygon but not
+            # real surface, so neither the air nor the shadow (directional mode only) may see them.
+            band = self._etch_band(solid, reach_max, recipe.angle_deg if directional else None)
+            x0, x1 = (-band, w + band) if band is not None else (-w, 2 * w)
+            padded = self._mirror_pad(solid, band=band, bulk=True)
+            shadow = self._shadow(solid, recipe.angle_deg, y_min, y_max, mirrored=padded) if directional else None
 
             # This substep's "air": everything in a box around the padded solid that isn't solid.
-            # Each factor's erosion ring is the solid within that factor's reach of the air -
-            # reach measured *through air and faster/equal material only*: see _reach_air.
-            reach_max = substep * distinct_factors[-1]
-            px0, _, px1, _ = padded_plain.bounds
-            air_box = box(
-                px0 - reach_max - _MARGIN, y_min - reach_max - _MARGIN, px1 + reach_max + _MARGIN, y_max + reach_max + _MARGIN
-            )
-            air = self._outside_air(_clean(air_box.difference(padded_plain)), air_box)
+            # Each factor's erosion ring is the air dilated by that factor's reach - through air
+            # and faster/equal material only, where a slower layer is thin: see _reach_air.
+            air_box = box(x0 - reach_max - _MARGIN, y_min - reach_max - _MARGIN, x1 + reach_max + _MARGIN, y_max + reach_max + _MARGIN)
+            air = self._outside_air(air_box.difference(padded), air_box)
+            # Thin parts of a band-cropped mirror image near the crop cut are not real geometry.
+            window = (x0 + reach_max, x1 - reach_max)
 
             ring_by_factor: dict[float, BaseGeometry] = {}
             for factor in distinct_factors:
                 if factor <= 0:
-                    ring_by_factor[factor] = Polygon()
                     continue
-                blockers = [
-                    self.layers[i].polygon
-                    for i, f in factor_by_index.items()
-                    if f < factor and not self.layers[i].polygon.is_empty
-                ]
-                blocked = self._mirror_pad(_clean(unary_union(blockers))) if blockers else Polygon()
-                reached = self._reach_air(air, air_box, blocked, substep * factor, recipe)
-                ring = padded_plain.intersection(reached)
+                reach = substep * factor
+                slower = [i for i in live if factors[i] < factor]
+                blocked: BaseGeometry = Polygon()
+                step = math.inf
+                if slower:
+                    until, step, hint = tunnel.get(factor, (k, math.inf, steps))
+                    if k >= until or step < reach:
+                        # The slower layers are needed to probe them, and to clip the stepped
+                        # dilation to what is passable while a probe's thin verdict holds.
+                        blocked = self._mirror_pad(_robust_union([self.layers[i].polygon for i in slower]), band=band)
+                    if k >= until:
+                        tunnel[factor] = self._tunnel_policy(
+                            blocked, reach, window, k, steps, substep * max(factors[i] for i in slower), hint
+                        )
+                        until, step, hint = tunnel[factor]
+                ring = self._reach_air(air, air_box, blocked, reach, recipe, step)
                 if shadow is not None:
                     ring = ring.difference(shadow)
-                ring_by_factor[factor] = self._crop(ring, y_min - substep - _MARGIN, y_max + _MARGIN)
+                # Simplified once here, not per layer: a small dilation's arcs (48-gons, sagitta
+                # far below the tolerance) would otherwise carry their vertices into every overlay.
+                ring_by_factor[factor] = ring.simplify(_SIMPLIFY_TOL, preserve_topology=True)
 
-            removed_parts = [
-                self.layers[i].polygon.intersection(ring_by_factor[factor])
-                for i, factor in factor_by_index.items()
-                if factor > 0
-            ]
-            removed_parts = [p for p in removed_parts if not p.is_empty]
+            etched = [i for i in live if factors[i] > 0]
+            removed = shapely.intersection(
+                np.array([self.layers[i].polygon for i in etched], dtype=object),
+                np.array([ring_by_factor[factors[i]] for i in etched], dtype=object),
+            )
+            removed_parts = [g for g in removed if not g.is_empty]
             if not removed_parts:
                 continue
             # Validity fixes only between substeps, no simplification: Douglas-Peucker trims a
@@ -1561,9 +1729,17 @@ class Geometry:
             # drift made a symmetric undercut visibly lopsided. Cleaned once, below.
             total_removed = unary_union(removed_parts).buffer(0)
             new_solid = solid.difference(total_removed).buffer(0)
-            for layer in self.layers:
-                if not layer.polygon.is_empty:
-                    layer.polygon = _drop_tiny(layer.polygon.intersection(new_solid).buffer(0))
+            # Only a layer the removal touches changes; the others already lie inside
+            # `new_solid`, to within the solid's own simplification tolerance.
+            shapely.prepare(total_removed)
+            for i in live:
+                if shapely.intersects(total_removed, self.layers[i].polygon):
+                    self.layers[i].polygon = _drop_tiny(self.layers[i].polygon.intersection(new_solid).buffer(0))
+            # The next substep's solid is rebuilt from the layers rather than taken as
+            # `new_solid`: the per-layer removals don't tile the ring to the last bit, and the
+            # hairline slivers `solid - removed` keeps along the layer seams, owned by no layer,
+            # would pile up substep after substep.
+            solid = self.solid()
         for layer in self.layers:
             if not layer.polygon.is_empty:
                 layer.polygon = _drop_tiny(_clean(layer.polygon))
@@ -1595,8 +1771,101 @@ class Geometry:
             tol = min(1.5 * substep * factor, _ETCH_SMOOTH_MAX)
             layer.polygon = self._smooth_exposed(layer.polygon, tol, interface)
 
+    def _etch_band(self, solid: BaseGeometry, reach_max: float, angle_deg: float | None) -> float | None:
+        """How much of each mirror image an etch substep needs (see `_mirror_pad`): the substep's
+        reach past the domain edge, plus - for a directional etch at `angle_deg` - how far
+        sideways a feature's shadow travels across the structure's height, plus any sealed void
+        (an interior ring of `solid`, or a pocket of air open to the edge and closed by its own
+        mirror image) whose mirror image the crop would cut: cut open, the void would read as
+        reachable air (see `_outside_air`). None when that comes to the whole domain anyway.
+        """
+        w = self.domain_width_nm
+        y_min, y_max = solid.bounds[1], solid.bounds[3]
+        band = reach_max + 2 * _MARGIN
+        if angle_deg is not None:
+            band += (y_max - y_min + reach_max + _MARGIN) * abs(math.tan(math.radians(angle_deg)))
+        if band >= w:
+            return None
+        parts = solid.geoms if isinstance(solid, MultiPolygon) else [solid]
+        spans = [(ring.bounds[0], ring.bounds[2]) for part in parts for ring in part.interiors]
+        # A pocket of air open to a domain edge but not to the chamber - half a void centred on
+        # the edge, an undercut reaching it - is sealed by its own mirror image, as an interior
+        # ring of the full mirrored solid would be.
+        top = y_max + _MARGIN
+        pockets = _polygonal(box(0.0, y_min, w, top).difference(solid))
+        for pocket in (pockets.geoms if isinstance(pockets, MultiPolygon) else [pockets]):
+            if pocket.is_empty:
+                continue
+            x0, _y0, x1, y1 = pocket.bounds
+            if y1 < top - 1e-9 and (x0 <= 1e-9 or x1 >= w - 1e-9):
+                spans.append((x0, x1))
+        grown = bool(spans)
+        while grown and band < w:
+            grown = False
+            for a, b in spans:
+                if a < band < b:
+                    band, grown = b + _MARGIN, True
+                if w - b < band < w - a:
+                    band, grown = w - a + _MARGIN, True
+        return None if band >= w else band
+
+    @staticmethod
+    def _tunnel_policy(
+        blocked: BaseGeometry,
+        reach: float,
+        window: tuple[float, float],
+        k: int,
+        steps: int,
+        recession: float,
+        hint: int,
+    ) -> tuple[int, float, int]:
+        """Whether `_reach_air` must dilate the air in geodesic steps to keep it from tunnelling
+        through a thin part of `blocked` (an etch factor's slower layers, mirror-padded) - and
+        if so, how long a step is safe. Returns `(until, step, hint)`: the verdict holds for
+        every substep index below `until`, `step` is the longest dilation that can't cross any
+        part of `blocked` (`inf`: none is thin enough, a single dilation is fine), and `hint` is
+        the widest probe worth trying next time.
+
+        A part thinner than `reach` with total area above `reach^2` counts as thin (see
+        `_thin_area`); anything smaller is a speck the air could only tunnel into by about its
+        own size. The slower layers only recede, by at most `recession` from each exposed side
+        per substep, so a part thicker than `reach + 2 * recession * n` now stays thicker than
+        `reach` for the next `n` substeps: a probe that much wider gives a "thick" verdict good
+        for those substeps - every remaining one for a mask that doesn't etch at all. The
+        horizon starts at `hint` and is halved until a probe passes; once the plain probe is
+        the only one that does, `hint` drops to 1 and wider probes are not tried again (a
+        structure with parts between `reach` and a wider probe is the norm when the slower
+        layers etch nearly as fast). A thin verdict's step comes from the thinnest part found
+        by halving the probe width: a step shorter than it can't cross it, `_GEODESIC_STEP` is
+        the floor the engine resolves, and a verdict at that floor can only improve, so it is
+        kept for as long as the slower layers take to recede by the reach before probing again.
+        """
+        tol = reach * reach
+        remaining = steps - k
+        h_max = remaining if recession <= 0 else max(1, min(remaining, math.ceil(reach / recession)))
+        h = min(hint, h_max)
+        while h > 1:
+            if _thin_area(blocked, reach + 2 * h * recession, window) <= tol:
+                return k + h, math.inf, min(2 * h, h_max)
+            h //= 2
+        if _thin_area(blocked, reach, window) <= tol:
+            return k + 1, math.inf, 1
+        r = reach / 2
+        while r > _GEODESIC_STEP:
+            if _thin_area(blocked, r, window) <= r * r:
+                return k + 1, max(_GEODESIC_STEP, 0.9 * r), 1
+            r /= 2
+        hold = remaining if recession <= 0 else max(1, min(remaining, math.ceil(reach / (2 * recession))))
+        return k + hold, _GEODESIC_STEP, 1
+
     def _reach_air(
-        self, air: BaseGeometry, air_box: BaseGeometry, blocked: BaseGeometry, reach: float, recipe: EtchRecipe
+        self,
+        air: BaseGeometry,
+        air_box: BaseGeometry,
+        blocked: BaseGeometry,
+        reach: float,
+        recipe: EtchRecipe,
+        step: float = math.inf,
     ) -> BaseGeometry:
         """Everything within `reach` of `air` *without passing through `blocked`* - the region one
         substep of an etch at that reach can remove, for a factor whose slower-etching layers are
@@ -1608,21 +1877,26 @@ class Geometry:
         removed as if the mask weren't there. Padding slower layers to "effectively infinite"
         thickness was the previous answer, but a layer extended upward within its own x-span
         swallows everything above it: the moment an oxide etch reaches the substrate, the whole
-        domain is guarded and the undercut under the mask stops dead. Here the dilation is simply
-        clipped to the passable region (everything but `blocked`), and - only while some blocker
-        is actually thinner than `reach`, since a thick one can't be tunnelled - done in steps no
-        longer than `_GEODESIC_STEP`, each clipped in turn: air creeps round a mask, never through
-        it, and a slower layer anywhere - above, beneath, buried - bounds how far the faster
-        erosion gets.
+        domain is guarded and the undercut under the mask stops dead. Here, when `step` (from
+        `_tunnel_policy`) says some part of `blocked` is thinner than `reach`, the dilation is
+        done in steps no longer than it, each clipped to the passable region (everything but
+        `blocked`): air creeps round a mask, never through it, and a slower layer anywhere -
+        above, beneath, buried - bounds how far the faster erosion gets. Otherwise (`step` at
+        least `reach`, the usual case) the plain dilation is returned as is: a thick blocker
+        can't be tunnelled, and the caller only ever intersects the result with the layers of
+        its own factor, which lie in the passable region anyway.
 
-        The last `_REACH_EPS` of the reach is grown separately, *after* the result is cleaned.
-        Where the dilated air is tangent to a layer interface (an undercut creeping along the
-        underside of a mask), the arc meets that line in a run of sub-nm segments, and `_clean`'s
-        simplification can drop the exact meeting point - leaving the ring a hair short of the
-        interface and the layer with a sub-nm "roof" over what should be an open trench; a roof
-        is a hole, the solid fills holes, and the etch stops. Overshooting the interface by that
-        hair costs nothing (the ring is intersected with each layer separately) and makes the
-        ring robust to it.
+        The stepped case grows the last `_REACH_EPS` of the reach separately, *after* the result
+        is cleaned. Where the dilated air is tangent to a layer interface (an undercut creeping
+        along the underside of a mask), the arc meets that line in a run of sub-nm segments, and
+        `_clean`'s simplification can drop the exact meeting point - leaving the ring a hair
+        short of the interface and the layer with a sub-nm "roof" over what should be an open
+        trench; a roof is a hole, the solid fills holes, and the etch stops. Overshooting the
+        interface by that hair costs nothing (the ring is intersected with each layer separately)
+        and makes the ring robust to it. Between two steps only a far finer simplification runs
+        (`_GEODESIC_SIMPLIFY`, below the arcs' own sagitta): Douglas-Peucker always cuts a convex
+        arc's corners inward, so a coarser one would bias the front, and none at all lets the
+        vertex count explode step after step.
         """
         if air.is_empty or reach <= 0:
             return Polygon()
@@ -1633,23 +1907,15 @@ class Geometry:
                 return geom.buffer(by, quad_segs=12)
             return sweep_union(geom, beam_vector(recipe.angle_deg, by))
 
+        if blocked.is_empty or step >= reach:
+            return grow(air, reach)
         eps = min(_REACH_EPS, reach / 2)
         inner = reach - eps
-        if blocked.is_empty:
-            reached = grow(air, inner)
-        else:
-            passable = _clean(air_box.difference(blocked))
-            mitre = {"join_style": "mitre"}
-            thin = blocked.difference(blocked.buffer(-reach / 2, **mitre).buffer(reach / 2, **mitre))
-            if thin.area <= reach * reach:
-                reached = grow(air, inner).intersection(passable)
-            else:
-                n = max(1, math.ceil(inner / _GEODESIC_STEP))
-                reached = air
-                for _ in range(n):
-                    # No simplification between steps: Douglas-Peucker always cuts a convex
-                    # arc's corners inward, and hundreds of such cuts would bias the front.
-                    reached = grow(reached, inner / n).intersection(passable).buffer(0)
+        passable = air_box.difference(blocked)
+        n = max(1, math.ceil(inner / step))
+        reached = air
+        for _ in range(n):
+            reached = grow(reached, inner / n).intersection(passable).simplify(_GEODESIC_SIMPLIFY, preserve_topology=True)
         return grow(_clean(reached), eps)
 
     def _smooth_exposed(self, geom: BaseGeometry, tol: float, interface: BaseGeometry) -> BaseGeometry:
