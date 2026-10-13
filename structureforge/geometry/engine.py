@@ -220,6 +220,14 @@ def _mitre_tips(eroded: BaseGeometry, d: float) -> np.ndarray:
     return shapely.polygons(np.concatenate(quads))
 
 
+def _speck_tol(r: float) -> float:
+    """The thin-part area (see `_thin_area`) below which tunnelling through parts thinner than `r`
+    is ignored: about a speck of `r` across, the air could only tunnel into by about its own
+    size - but never more than `_THIN_SPECK_NM2`, since a single substep as deep as the whole
+    etch (see `_etch_steps`) would otherwise take a whole mask for a speck."""
+    return min(r * r, _THIN_SPECK_NM2)
+
+
 def _thin_area(blocked: BaseGeometry, r: float, window: tuple[float, float] | None = None) -> float:
     """The area of the parts of `blocked` thinner than `r` (nm^2): what a morphological opening
     by `r / 2` (mitre joins, so real corners survive it) fails to restore. An etch substep's air,
@@ -295,7 +303,10 @@ _EDGE_SNAP = 1e-3  # nm - a vertex this close to a domain edge is put exactly on
 _GEODESIC_STEP = 0.25  # nm - an etch substep's reach is dilated in steps this long, see Geometry._reach_air
 _REACH_EPS = 0.03  # nm - the part of an etch substep's reach grown after cleaning, see Geometry._reach_air
 _ETCH_SMOOTH_MAX = 0.25  # nm - cap on how far an etched layer's exposed edge is straightened, see Geometry._smooth_exposed
+_DIRECTIONAL_COUPLING_NM = 0.5  # nm - how late a buried slower layer may start receding under a vertical beam, see Geometry._etch_steps
+_PREVIEW_SUBSTEP_DIVISOR = 4  # an etch previewed runs this many times fewer substeps, see Geometry.etch
 _GEODESIC_SIMPLIFY = 0.002  # nm - vertex-hygiene simplification between two geodesic steps, see Geometry._reach_air
+_THIN_SPECK_NM2 = 16.0  # nm^2 - the most a thin part may total and still be a speck the air may tunnel into, see _speck_tol
 _MITRE_TIP_MIN_TURN = math.radians(15.0)  # a corner turning less is too flat for its mitre tip to matter, see _mitre_tips
 
 
@@ -1626,6 +1637,7 @@ class Geometry:
         depth_nm: float,
         materials: MaterialLibrary,
         steps: int | None = None,
+        preview: bool = False,
     ) -> None:
         """Remove material along `recipe`'s direction, `depth_nm` deep for the recipe's reference
         (factor 1.0) material - other materials recede slower/faster per `recipe.factor_for`.
@@ -1651,15 +1663,23 @@ class Geometry:
         Afterwards, sub-angstrom films left by the final substep are removed, and the exposed
         edges of slowly-etched layers are straightened to within their own step height (see the
         end of this method and `_smooth_exposed`).
+
+        `steps`, if not given, is chosen by `_etch_steps`; `preview` divides that by
+        `_PREVIEW_SUBSTEP_DIVISOR` for a quick look (a few nm of error on an isotropic front).
         """
         if depth_nm <= 0 or not self.layers:
             return
+        factors = [recipe.factor_for(materials.get(l.material)) for l in self.layers]
+        live = [i for i, l in enumerate(self.layers) if not l.polygon.is_empty]
+        if not live:
+            return
         if steps is None:
-            steps = min(40, max(10, round(depth_nm / 2)))
+            steps = self._etch_steps(recipe, depth_nm, factors, live)
+            if preview:
+                steps = max(1, math.ceil(steps / _PREVIEW_SUBSTEP_DIVISOR))
         substep = depth_nm / steps
         directional = recipe.mode is EtchMode.directional
         w = self.domain_width_nm
-        factors = [recipe.factor_for(materials.get(l.material)) for l in self.layers]
         # factor -> (substep index its verdict holds until, geodesic step of `_reach_air`, probe hint)
         tunnel: dict[float, tuple[int, float, int]] = {}
 
@@ -1771,6 +1791,73 @@ class Geometry:
             tol = min(1.5 * substep * factor, _ETCH_SMOOTH_MAX)
             layer.polygon = self._smooth_exposed(layer.polygon, tol, interface)
 
+    def _etch_steps(self, recipe: EtchRecipe, depth_nm: float, factors: list[float], live: list[int]) -> int:
+        """How many substeps `etch` runs (see its docstring for what they buy). The default,
+        `max(10, depth / 2)` capped at 40, keeps every substep - hence every coupling error -
+        near 2 nm. A beam straight down (directional, angle 0) couples far less: its sweep is
+        exact for any substep (translations compose), it lights no sidewall, and its shadow is
+        cast by overhangs only. A substep then only matters where (a) a slower layer is
+        consumed and uncovers what lies below, (b) an overhang is consumed and uncovers what it
+        shadowed, or (c) a slower layer not lit from the start is uncovered and begins to recede
+        late - by at most a substep times its factor. Without (a) and (b) - no void, no
+        downward-facing edge above the wafer floor, no part of a slower layer thinner than what
+        it recedes over the whole etch - the substep is sized for (c) alone:
+        `_DIRECTIONAL_COUPLING_NM` divided by the fastest factor among the slower layers with a
+        top-facing edge that isn't on the exposed surface, and a single substep when there is
+        none (a resist mask eroding at 10% is lit from the start: it couples to nothing).
+        """
+        default = min(40, max(10, round(depth_nm / 2)))
+        if recipe.mode is not EtchMode.directional or abs(recipe.angle_deg) > 1e-9:
+            return default
+        f_max = max(factors[i] for i in live)
+        if f_max <= 0:
+            return default
+        solid = self.solid()
+        if solid.is_empty or _has_interior(solid) or self._has_overhang(solid):
+            return default
+        w = self.domain_width_nm
+        slower = [i for i in live if 0 < factors[i] < f_max]
+        if slower:
+            f_slow = max(factors[i] for i in slower)
+            r = 2 * depth_nm * f_slow
+            blocked = self._mirror_pad(_robust_union([self.layers[i].polygon for i in slower]), band=r + 2 * _MARGIN)
+            window = (-2 * _MARGIN, w + 2 * _MARGIN) if r + 2 * _MARGIN < w else (-w + r, 2 * w - r)
+            if _thin_area(blocked, r, window) > _speck_tol(r):
+                return default
+        shapely.prepare(solid)
+        buried = 0.0
+        for i in slower:
+            for part in (self.layers[i].polygon.geoms if isinstance(self.layers[i].polygon, MultiPolygon) else [self.layers[i].polygon]):
+                part = orient(part, sign=1.0)
+                for ring in [part.exterior, *part.interiors]:
+                    c = np.asarray(ring.coords)
+                    d = c[1:] - c[:-1]
+                    up = d[:, 0] < -1e-12  # right-hand normal (dy, -dx) pointing up
+                    if not up.any():
+                        continue
+                    mid = (c[1:][up] + c[:-1][up]) / 2
+                    if shapely.contains_xy(solid, mid[:, 0], mid[:, 1] + _SPLIT_TOL).any():
+                        buried = max(buried, factors[i])
+        if buried <= 0:
+            return 1
+        return min(default, max(1, math.ceil(depth_nm * buried / _DIRECTIONAL_COUPLING_NM)))
+
+    def _has_overhang(self, solid: BaseGeometry) -> bool:
+        """Whether `solid` has a downward-facing edge above the wafer floor (an overhanging mask,
+        a lifted film): the only thing a vertical beam's shadow is cast by. With no floor,
+        the solid's own bottom counts, which is the safe answer."""
+        for part in (solid.geoms if isinstance(solid, MultiPolygon) else [solid]):
+            part = orient(part, sign=1.0)
+            for ring in [part.exterior, *part.interiors]:
+                c = np.asarray(ring.coords)
+                d = c[1:] - c[:-1]
+                down = d[:, 0] > 1e-12  # right-hand normal (dy, -dx) pointing down
+                if self.floor_nm is not None:
+                    down &= np.maximum(c[1:, 1], c[:-1, 1]) > self.floor_nm + _SPLIT_TOL
+                if down.any():
+                    return True
+        return False
+
     def _etch_band(self, solid: BaseGeometry, reach_max: float, angle_deg: float | None) -> float | None:
         """How much of each mirror image an etch substep needs (see `_mirror_pad`): the substep's
         reach past the domain edge, plus - for a directional etch at `angle_deg` - how far
@@ -1826,9 +1913,9 @@ class Geometry:
         part of `blocked` (`inf`: none is thin enough, a single dilation is fine), and `hint` is
         the widest probe worth trying next time.
 
-        A part thinner than `reach` with total area above `reach^2` counts as thin (see
-        `_thin_area`); anything smaller is a speck the air could only tunnel into by about its
-        own size. The slower layers only recede, by at most `recession` from each exposed side
+        A part thinner than `reach` with total area above `_speck_tol(reach)` counts as thin
+        (see `_thin_area`); anything smaller is a speck the air could only tunnel into by about
+        its own size. The slower layers only recede, by at most `recession` from each exposed side
         per substep, so a part thicker than `reach + 2 * recession * n` now stays thicker than
         `reach` for the next `n` substeps: a probe that much wider gives a "thick" verdict good
         for those substeps - every remaining one for a mask that doesn't etch at all. The
@@ -1840,7 +1927,7 @@ class Geometry:
         the floor the engine resolves, and a verdict at that floor can only improve, so it is
         kept for as long as the slower layers take to recede by the reach before probing again.
         """
-        tol = reach * reach
+        tol = _speck_tol(reach)
         remaining = steps - k
         h_max = remaining if recession <= 0 else max(1, min(remaining, math.ceil(reach / recession)))
         h = min(hint, h_max)
@@ -1852,7 +1939,7 @@ class Geometry:
             return k + 1, math.inf, 1
         r = reach / 2
         while r > _GEODESIC_STEP:
-            if _thin_area(blocked, r, window) <= r * r:
+            if _thin_area(blocked, r, window) <= _speck_tol(r):
                 return k + 1, max(_GEODESIC_STEP, 0.9 * r), 1
             r /= 2
         hold = remaining if recession <= 0 else max(1, min(remaining, math.ceil(reach / (2 * recession))))

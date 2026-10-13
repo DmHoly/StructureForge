@@ -37,6 +37,7 @@ class SubstrateSpec(BaseModel):
 class SimulateRequest(BaseModel):
     substrate: SubstrateSpec
     steps: list[ProcessStep]
+    preview: bool = False  #: fewer etch substeps for a quick look (see `simulate`'s `preview`)
 
 
 class SimulateResponse(BaseModel):
@@ -129,7 +130,7 @@ def create_app(
         recipe_store.remove_etch(name)
         return list_recipes()
 
-    def _build_and_simulate(substrate: SubstrateSpec, steps: list[ProcessStep]) -> tuple[Geometry, list]:
+    def _build_and_simulate(substrate: SubstrateSpec, steps: list[ProcessStep], preview: bool = False) -> tuple[Geometry, list]:
         try:
             materials.get(substrate.material)
         except KeyError as exc:
@@ -137,7 +138,13 @@ def create_app(
 
         try:
             frames = cache.simulate(
-                substrate.material, substrate.domain_width.to_nm(), substrate.thickness.to_nm(), steps, materials, current_recipes()
+                substrate.material,
+                substrate.domain_width.to_nm(),
+                substrate.thickness.to_nm(),
+                steps,
+                materials,
+                current_recipes(),
+                preview=preview,
             )
         except SimulationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -147,7 +154,7 @@ def create_app(
 
     @app.post("/api/simulate")
     def run_simulation(request: SimulateRequest) -> SimulateResponse:
-        _geometry, frames = _build_and_simulate(request.substrate, request.steps)
+        _geometry, frames = _build_and_simulate(request.substrate, request.steps, request.preview)
         used_materials = {m.name: m.color for m in materials}
         return SimulateResponse(
             frames=[f.to_dict() for f in frames],

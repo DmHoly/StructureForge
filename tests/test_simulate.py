@@ -266,7 +266,7 @@ def test_cache_replays_only_from_the_first_changed_step(materials, recipes, monk
 
     applied = []
     real_apply = sim._apply
-    monkeypatch.setattr(sim, "_apply", lambda g, step, m, r: (applied.append(step.name), real_apply(g, step, m, r)))
+    monkeypatch.setattr(sim, "_apply", lambda g, step, m, r, **kw: (applied.append(step.name), real_apply(g, step, m, r, **kw)))
 
     cache = SimulationCache()
     flow = _flow()
@@ -318,7 +318,7 @@ def test_cache_is_keyed_on_substrate_and_recipes(materials, recipes, monkeypatch
 
     applied = []
     real_apply = sim._apply
-    monkeypatch.setattr(sim, "_apply", lambda g, step, m, r: (applied.append(step.name), real_apply(g, step, m, r)))
+    monkeypatch.setattr(sim, "_apply", lambda g, step, m, r, **kw: (applied.append(step.name), real_apply(g, step, m, r, **kw)))
     cache = SimulationCache()
     flow = _flow()
     cache.simulate("Si", 100, 30, flow, materials, recipes)
@@ -343,3 +343,30 @@ def test_cache_reports_a_failing_step_with_its_index_in_the_whole_flow(materials
     with pytest.raises(SimulationError) as excinfo:
         cache.simulate("Si", 100, 30, bad, materials, recipes)
     assert excinfo.value.step_index == 4
+
+
+def test_preview_runs_etches_with_fewer_substeps_and_is_cached_apart(materials, recipes, monkeypatch):
+    import structureforge.geometry.engine as engine
+
+    counts = []
+    real_steps = engine.Geometry._etch_steps
+    monkeypatch.setattr(engine.Geometry, "_etch_steps", lambda self, *a: (counts.append(real_steps(self, *a)), counts[-1])[1])
+    flow = [
+        Deposition(name="Oxyde", material="SiO2", recipe="CVD Conformal", thickness=Length.nm(40)),
+        Lithography(name="Masque", resist_material="Photoresist", thickness=Length.nm(20), openings=[(40, 60)]),
+        Etch(name="Gravure humide", recipe="Dry Oxide Etch", depth=Length.nm(30)),
+    ]
+    exact = simulate(Geometry.substrate("Si", 100, 30), flow, materials, recipes)
+    quick = simulate(Geometry.substrate("Si", 100, 30), flow, materials, recipes, preview=True)
+    assert counts[0] == 15  # the isotropic default for 30 nm
+    oxide_exact = next(l.polygon for l in exact[-1].layers if l.material == "SiO2")
+    oxide_quick = next(l.polygon for l in quick[-1].layers if l.material == "SiO2")
+    assert oxide_exact.symmetric_difference(oxide_quick).area < 0.05 * oxide_exact.area  # a preview, not a different structure
+
+    cache = SimulationCache()
+    cache.simulate("Si", 100, 30, flow, materials, recipes, preview=True)
+    applied = []
+    real_apply = sim_apply = __import__("structureforge.process.simulate", fromlist=["_apply"])._apply
+    monkeypatch.setattr(__import__("structureforge.process.simulate", fromlist=["_apply"]), "_apply", lambda g, step, m, r, **kw: (applied.append(kw.get("preview", False)), real_apply(g, step, m, r, **kw)))
+    cache.simulate("Si", 100, 30, flow, materials, recipes)  # exact: never resumed from the preview's frames
+    assert applied == [False, False, False]

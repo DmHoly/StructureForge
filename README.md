@@ -181,6 +181,7 @@ chaque appel plutôt que de réutiliser la même classe.
 | `Length` / `LengthDerivation` | Un paramètre numérique (épaisseur, profondeur, niveau cible) - littéral (`Length.nm(5)`) ou **dérivé** d'un petit arbre de process imbriqués (`Length.derived(...)`) expliquant *comment* la valeur a été atteinte. Voir [Comment une épaisseur est atteinte](#comment-une-épaisseur-est-atteinte--lengthderivation) plus bas. |
 | `Traced` / `LayerProvenance` | La même idée que `Length.derived(...)`, généralisée à **n'importe quel** paramètre de step (pas seulement une épaisseur) et attachée directement au `Layer` produit - une table ouverte `nom -> Traced` posée automatiquement par `simulate()` pour `EpitaxialGrowth`/`FacetedGrowth`. Voir [docs/layer-provenance.md](docs/layer-provenance.md). |
 | `simulate()` | Applique une liste de `ProcessStep` à une `Geometry` de départ, renvoie une `Frame` par étape (dont l'état initial) pour l'historique/le défilement. |
+| `simulate(..., preview=True)` | Mode aperçu rapide : chaque gravure tourne avec 4× moins de sous-étapes (une gravure isotrope peut se décaler de quelques nm, une directionnelle verticale ne change pas). Pour regarder vite en cours d'édition, pas pour un résultat à garder ; `SimulationCache.simulate(..., preview=True)` l'accepte aussi et ne mélange jamais frames exactes et aperçu. |
 | `SimulationCache` | `simulate()` avec mémoire des derniers runs : un flow qui partage ses premières étapes avec un run précédent repart de la `Frame` correspondante et ne rejoue que la suite - c'est ce que fait `/api/simulate`, donc modifier l'étape 18 d'un flow de 20 dans l'interface ne recalcule que 3 étapes. La clé tient compte du substrat, des matériaux et des recettes (une recette éditée invalide le cache). |
 
 ### L'exemple de sélectivité de la spec
@@ -273,7 +274,11 @@ documentée dans le code à l'endroit exact où elle s'applique :
   entrent dans le calcul : il est fait une fois avec assez de marge pour rester valable sur
   plusieurs sous-étapes (une couche ne peut que reculer), pas à chaque sous-étape. De même, le
   reflet aux bords du domaine ne couvre qu'une bande aussi large que ce qu'une sous-étape peut
-  atteindre, pas deux copies entières de la structure.
+  atteindre, pas deux copies entières de la structure. Une gravure directionnelle à faisceau
+  vertical n'a besoin de sous-étapes que si une couche plus lente peut être consommée, si un
+  surplomb fait de l'ombre, ou si une couche plus lente encore enfouie va être découverte (elle
+  se met alors à reculer avec au plus une sous-étape de retard, d'où un pas de 0,5 nm divisé
+  par son facteur) ; sinon elle se fait en une seule passe, exactement.
 
 Le lift-off (matière déposée sur une résine, qui part avec elle) est une conséquence émergente de
 `Geometry.remove_floating_debris()` (appelé après `ResistStrip`) plutôt qu'un modèle physique

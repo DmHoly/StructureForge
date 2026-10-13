@@ -72,12 +72,16 @@ def simulate(
     steps: list[ProcessStep],
     materials: MaterialLibrary,
     recipes: RecipeLibrary,
+    *,
+    preview: bool = False,
 ) -> list[Frame]:
     """Apply `steps` in order to `initial` (mutated in place) and return one `Frame` per step,
-    plus an implicit frame 0 for the starting geometry.
+    plus an implicit frame 0 for the starting geometry. `preview` trades accuracy for speed:
+    every etch runs a few times fewer substeps (see `Geometry.etch`), which shifts an isotropic
+    front by a few nm at most - for a quick look while editing, not for a result to keep.
     """
     frames = [Frame(0, "initial", "Structure de depart", _snapshot(initial), initial.domain_width_nm)]
-    return _simulate_from(initial, steps, materials, recipes, frames)
+    return _simulate_from(initial, steps, materials, recipes, frames, preview=preview)
 
 
 def _simulate_from(
@@ -86,6 +90,8 @@ def _simulate_from(
     materials: MaterialLibrary,
     recipes: RecipeLibrary,
     frames: list[Frame],
+    *,
+    preview: bool = False,
 ) -> list[Frame]:
     """Apply `steps` to `geometry` - the state after the last of `frames` - appending one `Frame`
     per step to a copy of `frames`, numbered on from them."""
@@ -93,7 +99,7 @@ def _simulate_from(
     first = len(frames)
     for i, step in enumerate(steps, start=first):
         try:
-            _apply(geometry, step, materials, recipes)
+            _apply(geometry, step, materials, recipes, preview=preview)
             geometry.compact()
         except Exception as exc:
             raise SimulationError(i, step, exc) from exc
@@ -127,11 +133,12 @@ class SimulationCache:
     20 costs two steps, not twenty. The GUI resubmits the whole flow on every change, and its
     users edit one step at a time, so nearly every run is such a prefix of an earlier one.
 
-    A run is keyed on everything else its frames depend on: the substrate, the material library
-    and the recipe library (custom recipes can change between two runs of the same flow). Steps
-    are compared by their serialized form, so two equal steps built separately match. The
-    snapshot a run resumes from is a `Frame`, which is immutable by construction (its layers'
-    polygons are never mutated in place), so resuming never disturbs the cached run.
+    A run is keyed on everything else its frames depend on: the substrate, the material library,
+    the recipe library (custom recipes can change between two runs of the same flow) and
+    whether it is a preview, so an exact run never resumes from a preview's frames. Steps are
+    compared by their serialized form, so two equal steps built separately match. The snapshot
+    a run resumes from is a `Frame`, which is immutable by construction (its layers' polygons
+    are never mutated in place), so resuming never disturbs the cached run.
     """
 
     def __init__(self, capacity: int = 8):
@@ -139,9 +146,11 @@ class SimulationCache:
         self._runs: list[_CachedRun] = []
 
     @staticmethod
-    def _key(material: str, domain_width_nm: float, thickness_nm: float, materials: MaterialLibrary, recipes: RecipeLibrary) -> str:
+    def _key(
+        material: str, domain_width_nm: float, thickness_nm: float, materials: MaterialLibrary, recipes: RecipeLibrary, preview: bool
+    ) -> str:
         digest = hashlib.sha256()
-        digest.update(repr((material, float(domain_width_nm), float(thickness_nm))).encode())
+        digest.update(repr((material, float(domain_width_nm), float(thickness_nm), bool(preview))).encode())
         digest.update(materials.model_dump_json().encode())
         digest.update(recipes.model_dump_json().encode())
         return digest.hexdigest()
@@ -154,10 +163,12 @@ class SimulationCache:
         steps: list[ProcessStep],
         materials: MaterialLibrary,
         recipes: RecipeLibrary,
+        *,
+        preview: bool = False,
     ) -> list[Frame]:
         """One `Frame` per step plus the initial one, exactly as `simulate` on
         `Geometry.substrate(material, domain_width_nm, thickness_nm)` would return."""
-        key = self._key(material, domain_width_nm, thickness_nm, materials, recipes)
+        key = self._key(material, domain_width_nm, thickness_nm, materials, recipes, preview)
         serialized = [step.model_dump(mode="json") for step in steps]
         best, shared = None, 0
         for run in self._runs:
@@ -172,10 +183,10 @@ class SimulationCache:
                 best, shared = run, n
         if best is None:
             geometry = Geometry.substrate(material, domain_width_nm, thickness_nm)
-            frames = simulate(geometry, steps, materials, recipes)
+            frames = simulate(geometry, steps, materials, recipes, preview=preview)
         else:
             geometry = _restore(best.frames[shared], -thickness_nm)
-            frames = _simulate_from(geometry, steps[shared:], materials, recipes, best.frames[: shared + 1])
+            frames = _simulate_from(geometry, steps[shared:], materials, recipes, best.frames[: shared + 1], preview=preview)
             self._runs.remove(best)
         self._runs.insert(0, _CachedRun(key, serialized, frames))
         del self._runs[self.capacity :]
@@ -192,14 +203,16 @@ def _traced_length(length: Length) -> Traced:
     return Traced.literal(length.to_nm())
 
 
-def _apply(geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, recipes: RecipeLibrary) -> None:
+def _apply(
+    geometry: Geometry, step: ProcessStep, materials: MaterialLibrary, recipes: RecipeLibrary, preview: bool = False
+) -> None:
     if isinstance(step, Deposition):
         materials.get(step.material)  # fail fast with a clear message if the material is unknown
         recipe = recipes.get_deposition(step.recipe)
         geometry.deposit(step.material, step.thickness.to_nm(), recipe)
     elif isinstance(step, Etch):
         recipe = recipes.get_etch(step.recipe)
-        geometry.etch(recipe, step.depth.to_nm(), materials)
+        geometry.etch(recipe, step.depth.to_nm(), materials, preview=preview)
     elif isinstance(step, Planarization):
         target = step.target_level.to_nm() if step.target_level is not None else None
         geometry.planarize(target_level_nm=target, stop_material=step.stop_material)

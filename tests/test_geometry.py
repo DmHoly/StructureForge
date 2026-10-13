@@ -4,6 +4,7 @@ import pytest
 from shapely.geometry import Point, Polygon, box
 from shapely.ops import unary_union
 
+from structureforge.core.recipes import EtchMode, EtchRecipe, default_recipes
 from structureforge.core.traced import Traced
 from structureforge.geometry.engine import Geometry, Layer, LayerProvenance
 
@@ -778,3 +779,64 @@ def test_directional_etch_consumes_a_slow_mask_at_its_own_rate(materials, recipe
     assert right.bounds[3] == pytest.approx(top, abs=0.02)
     assert right.bounds[0] == pytest.approx(140 + along * math.sin(math.radians(54.7)), abs=0.02)
     assert left.bounds[2] == pytest.approx(60.0, abs=1e-6)
+
+
+# -- substeps of a directional etch -------------------------------------------------------------
+
+
+def _substeps(g: Geometry, recipe, depth: float, materials) -> int:
+    factors = [recipe.factor_for(materials.get(l.material)) for l in g.layers]
+    live = [i for i, l in enumerate(g.layers) if not l.polygon.is_empty]
+    return g._etch_steps(recipe, depth, factors, live)
+
+
+def _masked_stack(resist_nm: float = 500.0) -> Geometry:
+    g = Geometry.substrate("GaN", domain_width_nm=400, thickness_nm=50)
+    g.deposit_conformal("SiO2", 50)
+    g.deposit_conformal("Si3N4", 80)
+    g.deposit_conformal_masked("Photoresist", resist_nm, open_x_ranges=[(100, 200)])
+    return g
+
+
+def test_vertical_etch_runs_in_one_substep_when_nothing_couples(materials, recipes):
+    """A beam straight down sweeps exactly whatever the substep, lights no sidewall and casts a
+    shadow only from overhangs: with a resist mask lit from the start and nothing slower buried
+    within reach, one substep gives the same structure forty did."""
+    rie = recipes.get_etch("Anisotropic RIE")  # resist at 0.1, everything else at 1
+    g = _masked_stack()
+    assert _substeps(g, rie, 80, materials) == 1
+    g.etch(rie, 80, materials)
+    reference = _masked_stack()
+    reference.etch(rie, 80, materials, steps=40)
+    for a, b in zip(g.layers, reference.layers):
+        assert a.material == b.material
+        assert a.polygon.symmetric_difference(b.polygon).area < 0.05
+        assert a.polygon.hausdorff_distance(b.polygon) < 0.05
+
+
+def test_vertical_etch_substeps_follow_a_buried_slower_layer(materials):
+    """The GaN under the oxide is slower and not lit yet: it starts receding only once uncovered,
+    at most a substep late - so the substep is sized by its factor, not by the depth."""
+    oxide = EtchRecipe(name="oxide RIE", mode=EtchMode.directional, selectivity_by_material={"SiO2": 1.0}, default_factor=0.05)
+    g = _masked_stack()
+    g.etch(default_recipes().get_etch("Anisotropic RIE"), 80, materials)  # open the nitride
+    assert _substeps(g, oxide, 51, materials) == math.ceil(51 * 0.05 / 0.5)
+
+
+def test_vertical_etch_keeps_fine_substeps_when_a_slow_layer_may_be_consumed(materials, recipes):
+    rie = recipes.get_etch("Anisotropic RIE")
+    g = _masked_stack(resist_nm=5.0)  # 80 nm of etching erodes 8 nm of resist: the mask goes
+    assert _substeps(g, rie, 80, materials) == 40
+
+
+def test_tilted_or_overhung_etches_keep_the_default_substeps(materials, recipes):
+    g = _masked_stack()
+    assert _substeps(g, recipes.get_etch("KOH Anisotropic Wet Etch"), 45, materials) == round(45 / 2)
+    assert _substeps(g, recipes.get_etch("Dry Oxide Etch"), 80, materials) == 40
+    with_overhang = Geometry(200.0, [
+        Layer("GaN", box(0, -50, 200, 0)),
+        Layer("SiO2", box(100, 0, 200, 10)),
+        Layer("SiO2", box(50, 10, 200, 30)),  # overhangs the cavity (50..100, 0..10)
+    ])
+    with_overhang.floor_nm = -50.0
+    assert _substeps(with_overhang, recipes.get_etch("Anisotropic RIE"), 20, materials) == 10
