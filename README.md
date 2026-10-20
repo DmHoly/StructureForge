@@ -7,7 +7,7 @@ matériaux et une bibliothèque de recettes (avec sélectivité), et on obtient 
 résultante, image par image (une par étape), avec une interface graphique multi-vues
 (vue d'ensemble + vue zoomée sur la zone active).
 
-Le projet est **indépendant de [Follow](https://github.com/DmHoly/Follow)** (le système de
+Le projet est **indépendant de [Follow](https://gitlab-it.aledia.com/sda/tools/soft/spectre/follow)** (le système de
 tracking façon git pour expériences scientifiques) : StructureForge simule et dessine ; Follow
 trace et versionne. Un adaptateur optionnel (`structureforge.adapters.follow_adapter`) convertit
 une géométrie simulée et son historique de process en `follow.Structure` / `follow.Step`, pour
@@ -139,7 +139,7 @@ process en `follow.Structure` / `follow.Step`, et `export_experiment()` committe
 tout dans un dépôt Follow :
 
 ```bash
-pip install -e ".[follow]"   # ajoute la dependance follow (git+https://github.com/DmHoly/Follow.git)
+pip install -e ".[follow]"   # ajoute la dependance follow (git+https://gitlab-it.aledia.com/sda/tools/soft/spectre/follow.git)
 ```
 
 ```python

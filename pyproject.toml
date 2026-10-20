@@ -20,7 +20,7 @@ api = [
     "uvicorn[standard]>=0.29",
 ]
 follow = [
-    "follow @ git+https://github.com/DmHoly/Follow.git",
+    "follow @ git+https://gitlab-it.aledia.com/sda/tools/soft/spectre/follow.git",
 ]
 dev = [
     "pytest>=8.0",
