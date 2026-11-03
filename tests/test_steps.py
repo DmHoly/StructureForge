@@ -28,3 +28,10 @@ def test_faceted_growth_rejects_a_negative_inverted_semi_polar_rate():
         FacetedGrowth(name="Coquille", material="InGaN", thickness=Length.nm(5), rate_sp_inv=-0.1)
     # inverted facets alone are a valid growth
     FacetedGrowth(name="Coquille", material="InGaN", thickness=Length.nm(5), rate_c=0, rate_m=0, rate_sp=0, rate_sp_inv=1)
+
+
+def test_faceted_growth_lateral_reach_is_positive():
+    FacetedGrowth(name="Coquille", material="InGaN", thickness=Length.nm(5), lateral_reach_nm=200)
+    with pytest.raises(ValidationError, match="lateral_reach_nm"):
+        FacetedGrowth(name="Coquille", material="InGaN", thickness=Length.nm(5), lateral_reach_nm=-10)
+

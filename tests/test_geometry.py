@@ -749,6 +749,72 @@ def test_faceted_growth_rejects_an_inverted_rate_below_the_engine_resolution():
         g.deposit_faceted("GaN", 300, rate_c=1, rate_m=0, rate_sp=0.25, rate_sp_inv=0.01, semi_polar_angle_deg=84)
 
 
+def _leaning_wire(angle_deg=6.0):
+    """A free-standing wire: 100 nm wide, vertical up to 300 nm, then 100 nm more whose flanks
+    lean out by `angle_deg` from vertical up to a flat c-plane top - two layers, as a core grown
+    on its nucleation, meeting where the flank starts to lean."""
+    lean = 100 * math.tan(math.radians(angle_deg))
+    g = Geometry(domain_width_nm=400)
+    g.layers.append(Layer(material="GaN", polygon=box(150, 0, 250, 300)))
+    g.layers.append(Layer(material="GaN", polygon=Polygon([(150, 300), (250, 300), (250 + lean, 400), (150 - lean, 400)])))
+    return g
+
+
+def test_faceted_growth_shell_wraps_a_leaning_flank_evenly():
+    """A flank a few degrees off vertical is a vicinal m-plane: the next growth wraps it as one,
+    even seeded and across the line where the core's two layers meet - neither the vertical
+    m-plane under the flank nor the flank's own lower part may cut its strip with their line."""
+    from shapely.geometry import LineString
+
+    g = _leaning_wire()
+    g.deposit_faceted("InGaN", 100, rate_c=1, rate_m=0.1, rate_sp=0.5, semi_polar_angle_deg=45, seed_materials=["GaN"])
+
+    shell = g.layers[-1].polygon
+    # (a few nm above the bend, where the two layers meet, a substep's strip is short by a nm)
+    for y in (100, 250, 350, 375, 395):
+        assert LineString([(200, y), (400, y)]).intersection(shell).length == pytest.approx(10.0, abs=0.1)
+
+
+def test_faceted_growth_lateral_reach_shades_the_sidewalls_down_to_that_depth():
+    """Shaded sidewalls grow fully at the top of the structure, linearly less below, not at all
+    from `lateral_reach_nm` down: a wedge on each flank, its outer face straight."""
+    from shapely.geometry import LineString
+
+    g = Geometry(domain_width_nm=400)
+    g.layers.append(Layer(material="GaN", polygon=box(150, 0, 250, 600)))
+    g.deposit_faceted("InGaN", 100, rate_c=0, rate_m=0.4, rate_sp=0, lateral_reach_nm=200)
+
+    film = g.layers[-1].polygon
+    for y, width in ((599.9, 40.0), (550, 30.0), (500, 20.0), (450, 10.0)):
+        assert LineString([(250, y), (400, y)]).intersection(film).length == pytest.approx(width, abs=0.3)
+    assert film.intersection(box(0, 0, 400, 399.9)).area == pytest.approx(0.0, abs=1e-6)
+    assert film.bounds[0] == pytest.approx(110.0, abs=0.01) and film.bounds[2] == pytest.approx(290.0, abs=0.01)
+
+
+def test_faceted_growth_lateral_reach_wraps_a_leaning_core_with_a_semi_polar_top():
+    """A shaded shell on a core whose flanks already lean out: its outer face leans further than
+    10 deg from vertical, the limit of a vicinal m-plane, and must keep growing all the same - one
+    face from the semi-polar top down to where the shade stops it, with no ledge in it."""
+    g = _leaning_wire(5)
+    g.deposit_faceted("InGaN", 100, rate_c=0.2, rate_m=0.4, rate_sp=0.3, semi_polar_angle_deg=45, lateral_reach_nm=150)
+
+    film = g.layers[-1].polygon
+    right = [(x, y) for x, y in film.exterior.coords if x > 200]
+    flank = [(x, y) for x, y in right if 300 < y < 380]
+    # the outer face: x increasing with y, no step back
+    outer = sorted((p for p in flank if p[0] > 262), key=lambda p: p[1])
+    assert all(b[0] >= a[0] - 1e-6 for a, b in zip(outer, outer[1:]))
+    # the top rises from 400 to 420 meanwhile: the shade starts 150 below it, at 250 at first
+    assert film.intersection(box(0, 0, 400, 400 - 150 - 0.1)).area == pytest.approx(0.0, abs=1e-6)
+
+
+def test_faceted_growth_rejects_a_lateral_reach_that_is_not_positive():
+    g = Geometry(domain_width_nm=400)
+    g.layers.append(Layer(material="GaN", polygon=box(150, 0, 250, 600)))
+    with pytest.raises(ValueError, match="lateral_reach_nm"):
+        g.deposit_faceted("InGaN", 100, rate_c=0, rate_m=0.4, rate_sp=0, lateral_reach_nm=0)
+
+
 def test_directional_etch_consumes_a_slow_mask_at_its_own_rate(materials, recipes):
     """Si3N4 etches at 2% of Si under KOH: 45 nm of Si is 0.9 nm of mask along the 54.7 deg beam,
     i.e. 0.52 nm off every beam-lit flat top and 0.73 nm off a beam-lit face, a leeward face

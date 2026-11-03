@@ -294,6 +294,7 @@ _MIN_NUCLEATION_EDGE = 1.0  # nm - a shorter edge between two parallel ones is a
 _MIN_SP_INV_FRACTION = 0.02  # slowest nonzero rate_sp_inv, relative to the fastest rate, see Geometry.deposit_faceted
 _VICINAL_COS = math.cos(math.radians(10.0))
 _VICINAL_SIN = math.sin(math.radians(10.0))  # an edge within 10 deg of a facet grows like it, see _offset_named_facets
+_SHADED_VICINAL_COS = math.cos(math.radians(30.0))  # ... within 30 deg of the m-plane when the sidewalls are shaded
 _UNION_GRID = 1e-4  # nm - snap grid for _robust_union's fallback
 _UNION_COVER_TOL = 1e-3  # nm^2 - how much of an input a union may leave out before it's redone, see _covering_union
 _COVER_GRID = 1e-6  # nm - snap grid that measures it
@@ -397,11 +398,31 @@ def sweep_union(geom: BaseGeometry, vector: tuple[float, float]) -> BaseGeometry
     return _clean(unary_union(pieces))
 
 
+def _reach_factor(y: float, top: float, reach: float) -> float:
+    """How much of its advance an m-plane keeps at height `y` when the growth reaches `reach`
+    below `top` (see `Geometry.deposit_faceted`): all of it at the top, none that deep or deeper,
+    linearly in between."""
+    return min(1.0, max(0.0, 1.0 - (top - y) / reach))
+
+
+def _split_at_level(coords: list[tuple[float, float]], level: float) -> list[tuple[float, float]]:
+    """A closed ring's vertices with one more wherever an edge crosses height `level`."""
+    out: list[tuple[float, float]] = []
+    for i, (x1, y1) in enumerate(coords):
+        x2, y2 = coords[(i + 1) % len(coords)]
+        out.append((x1, y1))
+        if (y1 - level) * (y2 - level) < 0:
+            t = (level - y1) / (y2 - y1)
+            out.append((x1 + t * (x2 - x1), level))
+    return out
+
+
 def _offset_named_facets(
     solid: BaseGeometry,
     named_directions: list[tuple[float, float, float, str]],
     edge_active: Callable[[tuple[float, float], tuple[float, float], tuple[float, float]], bool] | None = None,
     x_window: tuple[float, float] | None = None,
+    lateral_reach: tuple[float, float] | None = None,
 ) -> dict[str, BaseGeometry]:
     """Advance each straight edge of `solid`'s rings (exterior and, for an enclosed void, interior -
     see `_fill_holes`) along its own outward normal by
@@ -464,6 +485,12 @@ def _offset_named_facets(
 
     `x_window`, if given, skips every corner and edge lying entirely outside that x-range (the
     far parts of a mirror-padded solid, whose growth would be cropped away anyway).
+
+    `lateral_reach` = (top, reach), if given, shades the m-planes (label "m", vicinal ones too):
+    at height y they advance by their distance times `_reach_factor` - all of it at `top`, none
+    from `reach` below it down. An edge crossing that depth is split there; each edge then sweeps
+    a trapezoid instead of a rectangle, and bounds its neighbours with its tilted offset line. One
+    shaded nowhere is pinned, like a rate-0 facet.
     """
     facet_normals = [(nx, ny) for nx, ny, _d, _label in named_directions]
     named_directions = [(nx, ny, d, label) for nx, ny, d, label in named_directions if d > 1e-9]
@@ -485,7 +512,10 @@ def _offset_named_facets(
         # grows by step flow at that facet's rate rather than staying pinned: left pinned, it would
         # persist as a crevice carried up through every later layer.
         fx, fy, d, label = max(((dx, dy, d, label) for dx, dy, d, label, _ang in named), key=lambda e: e[0] * nx + e[1] * ny, default=(0.0, 0.0, 0.0, ""))
-        if fx * nx + fy * ny > _VICINAL_COS and not any(
+        # A shaded flank leans out as it thickens towards the top (see `lateral_reach`): still the
+        # m-plane, roughened by the shade, further off it than 10 degrees on an already flared core.
+        vicinal_cos = _SHADED_VICINAL_COS if lateral_reach is not None and label == "m" else _VICINAL_COS
+        if fx * nx + fy * ny > vicinal_cos and not any(
             abs(nx - px) < _FACET_SNAP_TOL and abs(ny - py) < _FACET_SNAP_TOL for px, py in facet_normals
         ):
             return d, label, (fx, fy)
@@ -555,6 +585,8 @@ def _offset_named_facets(
     for ring in rings:
         coords = list(ring.coords)[:-1]
         coords = [p for i, p in enumerate(coords) if p != coords[i - 1]]
+        if lateral_reach is not None:
+            coords = _split_at_level(coords, lateral_reach[0] - lateral_reach[1])
         n = len(coords)
         if n < 3:
             continue
@@ -581,6 +613,21 @@ def _offset_named_facets(
             labels.append(label)
             facet_dirs.append(facet_dir)
 
+        # How far each edge advances at its start and its end - the same unless shaded.
+        d_from, d_to = list(dists), list(dists)
+        shaded = [False] * n
+        if lateral_reach is not None:
+            for i in range(n):
+                if labels[i] != "m":
+                    continue
+                d_from[i] = dists[i] * _reach_factor(coords[i][1], *lateral_reach)
+                d_to[i] = dists[i] * _reach_factor(coords[(i + 1) % n][1], *lateral_reach)
+                dists[i] = max(d_from[i], d_to[i])
+                if dists[i] <= 1e-12:
+                    # deep in the shade: pinned, like a rate-0 facet - but only by the shade, so not
+                    # a bound for the rest of its own plane, higher up
+                    dists[i], d_from[i], d_to[i], labels[i], shaded[i] = 0.0, 0.0, 0.0, "", True
+
         # A sub-nm step - a riser between two parallel terraces, possibly made of a few sub-nm
         # edges (an etch leaves the floor of an opening in terraces a few angstroms apart) - is
         # not a facet: it rises with its terraces (translated along their normal by their
@@ -606,7 +653,7 @@ def _offset_named_facets(
             if bx * ax + by * ay > _VICINAL_COS and active[before]:
                 riser[i] = True
                 nx, ny = normals[i]
-                dists[i] = dists[before] * max(0.0, nx * bx + ny * by)
+                dists[i] = d_from[i] = d_to[i] = d_to[before] * max(0.0, nx * bx + ny * by)
                 labels[i] = labels[before]
                 facet_dirs[i] = facet_dirs[before]
 
@@ -621,7 +668,14 @@ def _offset_named_facets(
         for i in range(n):
             nx, ny = normals[i]
             (x1, y1), (x2, y2) = coords[i], coords[(i + 1) % n]
-            if labels[i] and not is_facet(nx, ny):
+            if d_from[i] != d_to[i]:
+                # a shaded edge: its offset line tilts, from one end's advance to the other's
+                q1 = (x1 + nx * d_from[i], y1 + ny * d_from[i])
+                q2 = (x2 + nx * d_to[i], y2 + ny * d_to[i])
+                length = math.hypot(q2[0] - q1[0], q2[1] - q1[1])
+                tx, ty = (q2[1] - q1[1]) / length, -(q2[0] - q1[0]) / length
+                offsets.append((tx, ty, tx * q1[0] + ty * q1[1]))
+            elif labels[i] and not is_facet(nx, ny):
                 fx, fy = facet_dirs[i]
                 offsets.append((fx, fy, max(fx * x1 + fy * y1, fx * x2 + fy * y2) + dists[i]))
             else:
@@ -695,6 +749,16 @@ def _offset_named_facets(
                 chain.extend((nx, ny, d, label) for nx, ny, d, label, _ang in extras)
             chain.append((n_out[0], n_out[1], dists[i], labels[i]))
             chains.append(chain)
+        if lateral_reach is not None:
+            # at a corner, each edge advances by its own advance at that corner, and an m-plane
+            # nucleating there by the shade's
+            for i, chain in enumerate(chains):
+                factor = _reach_factor(coords[i][1], *lateral_reach)
+                chain[0] = (*chain[0][:2], d_to[i - 1], chain[0][3])
+                chain[-1] = (*chain[-1][:2], d_from[i], chain[-1][3])
+                for k in range(1, len(chain) - 1):
+                    if chain[k][3] == "m":
+                        chain[k] = (*chain[k][:2], chain[k][2] * factor, "m")
         nucleated = [
             [(nx, ny, nx * coords[i][0] + ny * coords[i][1] + d) for nx, ny, d, _l in chains[i][1:-1]]
             for i in range(n)
@@ -733,10 +797,19 @@ def _offset_named_facets(
             # own to stop anything at.
             # A facet nucleating at a corner of the run bounds it too, or the neighbouring edge's
             # strip would poke past it and leave a sliver of edge for the next growth step to grow.
+            # Not a vicinal neighbour of a vicinal piece of the same facet, though: on a flank
+            # leaning out (a flared core, split where two layers meet), the exact line through the
+            # lower edge's outer end would cut the upper edge's strip down to nothing.
+            own_vicinal = {facet_dirs[j] for j in own if labels[j] and not is_facet(*normals[j])}
+            own_dirs = {facet_dirs[j] for j in own}
             planes = [
                 offsets[j]
                 for j in idx
-                if j in own or (active[j] and not riser[j] and (is_facet(*normals[j]) or labels[j]))
+                if j in own or (
+                    active[j] and not riser[j] and (is_facet(*normals[j]) or labels[j])
+                    and not (labels[j] and facet_dirs[j] in own_vicinal)
+                    and not (shaded[j] and facet_dirs[j] in own_dirs)
+                )
             ]
             return planes + [plane for c in corners for plane in nucleated[c]]
 
@@ -760,8 +833,8 @@ def _offset_named_facets(
 
         for i in range(n):
             v = coords[i]
-            n_in, d_in, lbl_in = normals[i - 1], dists[i - 1], labels[i - 1]
-            n_out, d_out, lbl_out = normals[i], dists[i], labels[i]
+            n_in, d_in, lbl_in = normals[i - 1], d_to[i - 1], labels[i - 1]
+            n_out, d_out, lbl_out = normals[i], d_from[i], labels[i]
             if (d_in <= 0 and d_out <= 0 and len(chains[i]) == 2) or outside(v[0]):
                 continue
             p_in = (v[0] + n_in[0] * d_in, v[1] + n_in[1] * d_in)
@@ -791,7 +864,7 @@ def _offset_named_facets(
                 continue
             v_i, v_next = coords[i], coords[(i + 1) % n]
             nx, ny = normals[i]
-            strip = [v_i, v_next, (v_next[0] + nx * dists[i], v_next[1] + ny * dists[i]), (v_i[0] + nx * dists[i], v_i[1] + ny * dists[i])]
+            strip = [v_i, v_next, (v_next[0] + nx * d_to[i], v_next[1] + ny * d_to[i]), (v_i[0] + nx * d_from[i], v_i[1] + ny * d_from[i])]
             if outside(v_i[0], v_next[0]):
                 continue
             piece = clipped(strip, bounds_around(i, i))
@@ -1339,6 +1412,7 @@ class Geometry:
         max_substep_nm: float = 10.0,
         rate_sp_inv: float = 0.0,
         material_sp_inv: str | None = None,
+        lateral_reach_nm: float | None = None,
     ) -> None:
         """Faceted growth: add `material` by advancing three crystal-plane families - c-plane
         {0001} (`rate_c`), m-plane {10-10} sidewalls (`rate_m`), and semi-polar facets at
@@ -1395,6 +1469,13 @@ class Geometry:
         hexagon around the tip: c-plane top, SP facets, inverted SP facets, and an m-plane at its
         widest only if rate_m > 0.
 
+        `lateral_reach_nm` shades the sidewalls, the way neighbouring wires keep the growth species
+        from reaching the bottom of a forest of them: the m-planes advance at full `rate_m` at the
+        top of the structure, less and less further down, and not at all `lateral_reach_nm` below
+        it - a layer that widens from the flanks, thickest at the top and gone at that depth, its
+        outer face straight. The top is the structure's highest point at each substep. Unset (the
+        default), the sidewalls grow alike all the way down.
+
         `seed_materials` enables SAG selectivity (same semantics as `deposit_epitaxial`).
 
         `provenance`, if given, is attached as-is to every `Layer` this call creates (see
@@ -1411,6 +1492,8 @@ class Geometry:
                 f"rate_sp_inv must be 0 or at least {_MIN_SP_INV_FRACTION:g} x the fastest rate "
                 f"({_MIN_SP_INV_FRACTION * max_rate:.3g} here), got {rate_sp_inv:g}"
             )
+        if lateral_reach_nm is not None and lateral_reach_nm <= 0:
+            raise ValueError(f"lateral_reach_nm must be > 0, got {lateral_reach_nm:g}")
         if thickness_nm <= 0 or max_rate <= 0 or not self.layers:
             return
         if seed_materials and not any(
@@ -1441,7 +1524,7 @@ class Geometry:
             count = len(self.layers)
             self._deposit_faceted_once(
                 thickness_nm / n, rate_c, rate_m, rate_sp, semi_polar_angle_deg, seeds,
-                {family: tags[m] for family, m in families.items()}, rate_sp_inv, solid,
+                {family: tags[m] for family, m in families.items()}, rate_sp_inv, solid, lateral_reach_nm,
             )
             # The solid the next substep grows on: last one's union plus this substep's films only -
             # `solid()` would re-merge every film grown so far, a cost growing with each substep
@@ -1477,6 +1560,7 @@ class Geometry:
         materials_by_family: dict[str, str],
         rate_sp_inv: float = 0.0,
         solid: BaseGeometry | None = None,
+        lateral_reach_nm: float | None = None,
     ) -> None:
         """One single-offset substep of `deposit_faceted`, appending one Layer per material in
         `materials_by_family` (keyed "c"/"m"/"sp", plus "sp_inv" when `rate_sp_inv` > 0).
@@ -1521,7 +1605,8 @@ class Geometry:
                 (-math.sin(theta), -math.cos(theta), rate_sp_inv * t, "sp_inv"),
             ]
         pieces_by_family = _offset_named_facets(
-            padded, named_directions, edge_active, x_window=(-reach, self.domain_width_nm + reach)
+            padded, named_directions, edge_active, x_window=(-reach, self.domain_width_nm + reach),
+            lateral_reach=(y_max, lateral_reach_nm) if lateral_reach_nm is not None else None,
         )
         max_reach = t * (rate_c + rate_m + rate_sp) / max(math.cos(theta), 0.05) + 1.0
 

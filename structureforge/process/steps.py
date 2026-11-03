@@ -165,6 +165,11 @@ plus an optional fourth, off by default:
     name this step adds one layer, otherwise one layer per distinct material, each holding only
     the area that actually grew from that family's own facets.
 
+    `lateral_reach_nm` shades the sidewalls, as neighbouring wires do: the m-planes grow at full
+    `rate_m` at the top of the structure, less and less further down, and not at all that many nm
+    below it - a layer widening from the flanks, thickest at the top, its outer face straight.
+    Unset (the default), the sidewalls grow alike all the way down.
+
     `seed_materials` works exactly like in `EpitaxialGrowth` (SAG selectivity).
     """
 
@@ -184,6 +189,7 @@ plus an optional fourth, off by default:
     material_sp: str | None = None
     rate_sp_inv: float = 0.0
     material_sp_inv: str | None = None
+    lateral_reach_nm: float | None = None
 
     @model_validator(mode="after")
     def _check_rates(self) -> "FacetedGrowth":
@@ -193,6 +199,8 @@ plus an optional fourth, off by default:
             raise ValueError("at least one growth rate must be > 0")
         if not (0.0 < self.semi_polar_angle_deg < 90.0):
             raise ValueError(f"semi_polar_angle_deg must be in (0, 90), got {self.semi_polar_angle_deg}")
+        if self.lateral_reach_nm is not None and self.lateral_reach_nm <= 0:
+            raise ValueError(f"lateral_reach_nm must be > 0, got {self.lateral_reach_nm}")
         return self
 
 

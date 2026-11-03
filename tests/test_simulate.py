@@ -245,6 +245,25 @@ def test_faceted_growth_step_with_inverted_facets_grows_a_shell_past_the_sidewal
     assert layers[0].provenance.parameters["rate_sp_inv"].value == 0.5
 
 
+def test_faceted_growth_step_with_a_lateral_reach_shades_the_sidewalls_and_traces_it(materials, recipes):
+    geometry = Geometry(domain_width_nm=400)
+    geometry.layers.append(Layer(material="GaN", polygon=box(150, 0, 250, 600)))
+    step = FacetedGrowth(
+        name="Coquille",
+        material="InGaN",
+        thickness=Length.nm(100),
+        rate_c=0.0,
+        rate_m=0.4,
+        rate_sp=0.0,
+        lateral_reach_nm=200,
+    )
+    frames = simulate(geometry, [step], materials, recipes)
+
+    shell = frames[-1].layers[-1]
+    assert shell.polygon.bounds[1] == pytest.approx(400.0, abs=0.01)
+    assert shell.provenance.parameters["lateral_reach_nm"].value == 200
+
+
 # -- SimulationCache: replay only the steps that changed ---------------------------------------
 
 

@@ -258,6 +258,7 @@ def _apply(
                 "rate_m": Traced.literal(step.rate_m),
                 "rate_sp": Traced.literal(step.rate_sp),
                 **({"rate_sp_inv": Traced.literal(step.rate_sp_inv)} if step.rate_sp_inv else {}),
+                **({"lateral_reach_nm": Traced.literal(step.lateral_reach_nm)} if step.lateral_reach_nm is not None else {}),
                 "semi_polar_angle_deg": Traced.literal(step.semi_polar_angle_deg),
                 "seed_materials": Traced.literal(list(step.seed_materials)),
             },
@@ -276,6 +277,7 @@ def _apply(
             provenance=provenance,
             rate_sp_inv=step.rate_sp_inv,
             material_sp_inv=step.material_sp_inv,
+            lateral_reach_nm=step.lateral_reach_nm,
         )
     elif isinstance(step, FacetEnvelope):
         materials.get(step.material)
