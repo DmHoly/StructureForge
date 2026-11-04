@@ -93,12 +93,20 @@ def _close_seams(geom: BaseGeometry, solid: BaseGeometry | None = None) -> BaseG
     lines across the layer. Closing by `_SEAM_EPS` seals the first two, and a much finer opening
     by `_FLAP_EPS` removes the third - fine enough to keep a thin but real wedge (e.g. the one
     holding an overgrowth front down on a mask). Mitre joins leave real corners where they are. `solid`, if given, is subtracted again afterwards,
-    since closing can reach a hair into a concave corner of it."""
+    since closing can reach a hair into a concave corner of it.
+
+    GEOS (3.13) can silently drop whole parts when it mitre-dilates a `MultiPolygon` of many
+    pieces with zero-width tips - a shaded faceted film over a block of wires comes as hundreds
+    of chevrons, and came back with 4 wires out of 15. A dilation never loses area, so one that
+    does is redone part by part, which keeps them all."""
     if geom.is_empty:
         return geom
     mitre = {"join_style": "mitre"}
     with np.errstate(divide="ignore", invalid="ignore"):  # GEOS mitre on a degenerate segment - harmless
-        geom = geom.buffer(_SEAM_EPS, **mitre).buffer(-_SEAM_EPS - _FLAP_EPS, **mitre).buffer(_FLAP_EPS, **mitre)
+        closed = geom.buffer(_SEAM_EPS, **mitre)
+        if closed.area < geom.area and hasattr(geom, "geoms"):
+            closed = shapely.union_all([g.buffer(_SEAM_EPS, **mitre) for g in geom.geoms])
+        geom = closed.buffer(-_SEAM_EPS - _FLAP_EPS, **mitre).buffer(_FLAP_EPS, **mitre)
     if solid is not None and not geom.is_empty:
         geom = geom.difference(solid)
     return _clean(geom)
@@ -302,6 +310,7 @@ _SPLIT_TOL = 0.05  # nm - a layer vertex this close to a solid edge splits that 
 _EDGE_SNAP = 1e-3  # nm - a vertex this close to a domain edge is put exactly on it, see Geometry._snap_edges:
                    # boolean ops leave them 1e-5..1e-4 nm off, and no real feature is a picometre wide
 _GEODESIC_STEP = 0.25  # nm - an etch substep's reach is dilated in steps this long, see Geometry._reach_air
+_MASK_FACTOR_RATIO = 0.5  # a layer etched below this share of a factor's rate can't be tunnelled through by it, see Geometry.etch
 _REACH_EPS = 0.03  # nm - the part of an etch substep's reach grown after cleaning, see Geometry._reach_air
 _ETCH_SMOOTH_MAX = 0.25  # nm - cap on how far an etched layer's exposed edge is straightened, see Geometry._smooth_exposed
 _DIRECTIONAL_COUPLING_NM = 0.5  # nm - how late a buried slower layer may start receding under a vertical beam, see Geometry._etch_steps
@@ -979,8 +988,9 @@ class Geometry:
       rounding off oddly. Keep the domain wide enough that features of interest aren't hugging it.
     - **Selective etch runs in substeps.** Each substep finds, per distinct rate factor present,
       what that factor's reach of the current air can get to without passing through any
-      slower-etching layer, and removes from each layer only its own factor's share. A thinner,
-      slower-etching layer (a resist mask, a stop layer) is never tunnelled through, the
+      markedly slower-etching layer (see `etch`), and removes from each layer only its own
+      factor's share. A thinner, slower-etching layer (a resist mask, a stop layer) is never
+      tunnelled through, the
       material under a mask is only reached round the mask's edge, and a slower layer being
       exposed (an oxide etch reaching the substrate) doesn't stop the faster material beside it
       from receding. This gets multi-material selectivity, masked undercut, and etch-through-
@@ -1745,6 +1755,14 @@ class Geometry:
         factor's slower layers are probed for thin parts once, with enough margin to hold for as
         many substeps as their own recession allows (see `_tunnel_policy`), not every substep.
 
+        Only a layer etched below `_MASK_FACTOR_RATIO` of a factor's rate counts as slower for it:
+        GaN at 0.8x under an oxide etch is no mask. A thin part of such a layer recedes by at
+        least half the reach from its own lit side each substep, so the air tunnelling through
+        it gets at most `substep * (factor - its factor)` - under half a reach - ahead of the
+        front, an error within the one-substep error the scheme has anyway; guarding it instead
+        steps the dilation in `_GEODESIC_STEP`s over the whole domain whenever such a layer has a
+        part thinner than the reach, which a shell thinned by shading always does.
+
         Afterwards, sub-angstrom films left by the final substep are removed, and the exposed
         edges of slowly-etched layers are straightened to within their own step height (see the
         end of this method and `_smooth_exposed`).
@@ -1799,7 +1817,7 @@ class Geometry:
                 if factor <= 0:
                     continue
                 reach = substep * factor
-                slower = [i for i in live if factors[i] < factor]
+                slower = [i for i in live if factors[i] < factor * _MASK_FACTOR_RATIO]
                 blocked: BaseGeometry = Polygon()
                 step = math.inf
                 if slower:
