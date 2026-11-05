@@ -34,6 +34,15 @@ class GrowthOrientation(str, Enum):
 
 
 class Deposition(BaseModel):
+    """A film of `material`, `thickness` thick, laid by `recipe` (conformal or directional).
+
+    `roughness_nm` makes it non-uniform, a "gratin": its outer face becomes grains standing up to
+    that many nm above or below the nominal thickness, `grain_nm` wide (4x `roughness_nm` if
+    unset). A roughness above the thickness leaves bare spots - islands rather than a closed film.
+    The grains are drawn from the step's name, so the same step always gives the same ones.
+    Unset (the default), the film is smooth.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["deposition"] = "deposition"
@@ -41,6 +50,18 @@ class Deposition(BaseModel):
     material: str
     recipe: str
     thickness: Length
+    roughness_nm: float | None = None
+    grain_nm: float | None = None
+
+    @model_validator(mode="after")
+    def _check_roughness(self) -> "Deposition":
+        if self.roughness_nm is not None and self.roughness_nm <= 0:
+            raise ValueError(f"roughness_nm must be > 0, got {self.roughness_nm}")
+        if self.grain_nm is not None and self.grain_nm <= 0:
+            raise ValueError(f"grain_nm must be > 0, got {self.grain_nm}")
+        if self.grain_nm is not None and self.roughness_nm is None:
+            raise ValueError("grain_nm only applies to a rough deposition: set roughness_nm too")
+        return self
 
 
 class Etch(BaseModel):

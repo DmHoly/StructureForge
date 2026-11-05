@@ -310,6 +310,8 @@ _SPLIT_TOL = 0.05  # nm - a layer vertex this close to a solid edge splits that 
 _EDGE_SNAP = 1e-3  # nm - a vertex this close to a domain edge is put exactly on it, see Geometry._snap_edges:
                    # boolean ops leave them 1e-5..1e-4 nm off, and no real feature is a picometre wide
 _GEODESIC_STEP = 0.25  # nm - an etch substep's reach is dilated in steps this long, see Geometry._reach_air
+_ROUGH_CONTACT_TOL = 0.01  # nm - a rough film's face closer than this to the solid beneath rests on it (no grains there)
+_ROUGH_MAX_GRAINS = 20000  # past this many grains along a rough film, they're spread out rather than drawn finer
 _MASK_FACTOR_RATIO = 0.5  # a layer etched below this share of a factor's rate can't be tunnelled through by it, see Geometry.etch
 _REACH_EPS = 0.03  # nm - the part of an etch substep's reach grown after cleaning, see Geometry._reach_air
 _ETCH_SMOOTH_MAX = 0.25  # nm - cap on how far an etched layer's exposed edge is straightened, see Geometry._smooth_exposed
@@ -1313,11 +1315,85 @@ class Geometry:
         if not film.is_empty:
             self.layers.append(Layer(material=material, polygon=film))
 
-    def deposit(self, material: str, thickness_nm: float, recipe: DepositionRecipe) -> None:
+    def deposit(
+        self,
+        material: str,
+        thickness_nm: float,
+        recipe: DepositionRecipe,
+        roughness_nm: float | None = None,
+        grain_nm: float | None = None,
+        seed: int = 0,
+    ) -> None:
+        """`roughness_nm`: the film's outer face is no longer smooth but made of grains, each
+        standing up to `roughness_nm` above or sinking as far below the nominal thickness - see
+        `_roughen`. `grain_nm` is their lateral size (4x `roughness_nm` if unset), `seed` the draw:
+        the same seed on the same surface always gives the same grains."""
+        before = len(self.layers)
+        solid = self.solid() if roughness_nm else None
         if recipe.mode is DepositionMode.conformal:
             self.deposit_conformal(material, thickness_nm)
         else:
             self.deposit_directional(material, thickness_nm, recipe.angle_deg)
+        if roughness_nm and len(self.layers) > before:
+            film = self._roughen(self.layers[-1].polygon, solid, roughness_nm, grain_nm or 4 * roughness_nm, seed)
+            if film.is_empty:
+                self.layers.pop()
+            else:
+                self.layers[-1].polygon = film
+
+    def _roughen(
+        self, film: BaseGeometry, solid: BaseGeometry, amplitude_nm: float, grain_nm: float, seed: int
+    ) -> BaseGeometry:
+        """`film`'s free face (the part not resting on `solid`) turned into grains: one every half
+        grain along it, each a disk of half the grain size, its height drawn uniformly in
+        [-amplitude, +amplitude]. A positive grain is a bump added on top of the face, a negative
+        one a dimple cut into it - and one deeper than the film itself leaves a bare spot, so a
+        roughness above the thickness gives islands rather than a closed film. The disks never
+        reach into `solid`, and a face the deposit never coated (a shadowed flank) grows none.
+        """
+        radius = max(grain_nm / 2, amplitude_nm)  # a smaller disk would float off its own bump
+        surface = film.boundary.difference(solid.buffer(_ROUGH_CONTACT_TOL))
+        # the domain's own vertical edges are cuts, not a surface the film exposes
+        x_min, x_max = _ROUGH_CONTACT_TOL, self.domain_width_nm - _ROUGH_CONTACT_TOL
+        surface = surface.intersection(box(x_min, film.bounds[1] - 1.0, x_max, film.bounds[3] + 1.0))
+        lines = [g for g in shapely.get_parts(shapely.line_merge(surface)) if isinstance(g, LineString) and g.length > 0]
+        if not lines:
+            return film
+        total = sum(line.length for line in lines)
+        spacing = max(radius, total / _ROUGH_MAX_GRAINS)
+        points, normals = [], []
+        for line in lines:
+            n = max(1, round(line.length / spacing))
+            at = (np.arange(n) + 0.5) * line.length / n
+            delta = min(_ROUGH_CONTACT_TOL, line.length / (4 * n))
+            p = shapely.get_coordinates(shapely.line_interpolate_point(line, at))
+            ahead = shapely.get_coordinates(shapely.line_interpolate_point(line, np.minimum(at + delta, line.length)))
+            behind = shapely.get_coordinates(shapely.line_interpolate_point(line, np.maximum(at - delta, 0.0)))
+            tangent = ahead - behind
+            normal = np.column_stack([-tangent[:, 1], tangent[:, 0]])
+            normal /= np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-12)
+            points.append(p)
+            normals.append(normal)
+        p, normal = np.vstack(points), np.vstack(normals)
+        # point every normal out of the matter, into the air the film faces
+        whole = _robust_union([solid, film])
+        probe = p + normal * _ROUGH_CONTACT_TOL
+        normal[shapely.contains_xy(whole, probe[:, 0], probe[:, 1])] *= -1
+
+        rng = np.random.default_rng(seed)
+        height = rng.uniform(-amplitude_nm, amplitude_nm, len(p))
+        bump, dimple = height > 0, height < 0
+        # a bump's disk tops out `height` above the face, a dimple's bottoms out `-height` below it
+        bumps = shapely.buffer(shapely.points(p[bump] + normal[bump] * (height[bump] - radius)[:, None]), radius, quad_segs=6)
+        dimples = shapely.buffer(shapely.points(p[dimple] + normal[dimple] * (height[dimple] + radius)[:, None]), radius, quad_segs=6)
+        rough = film
+        if len(dimples):
+            rough = rough.difference(_robust_union(list(dimples)))
+        if len(bumps):
+            rough = _robust_union([rough, *bumps])
+        rough = rough.difference(solid)
+        y_min, y_max = whole.bounds[1], whole.bounds[3]
+        return self._crop(rough, y_min, y_max + 2 * radius)
 
     def deposit_epitaxial(
         self,

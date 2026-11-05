@@ -926,3 +926,47 @@ def test_closing_the_seams_of_a_shaded_film_keeps_every_part():
     assert closed.area == pytest.approx(film.area, rel=1e-3)
     assert not closed.intersection(box(4400, 0, 4800, 1000)).is_empty
     assert not closed.intersection(box(400, 0, 700, 1000)).is_empty
+
+
+def test_rough_deposit_keeps_its_face_within_the_roughness_of_the_nominal_thickness(recipes):
+    g = Geometry.substrate("Si", domain_width_nm=200, thickness_nm=20)
+    g.deposit("SiO2", 20, recipes.get_deposition("CVD Conformal"), roughness_nm=4, grain_nm=10, seed=1)
+
+    film = next(l for l in g.layers if l.material == "SiO2").polygon
+    assert film.bounds[1] == pytest.approx(0.0, abs=1e-6)  # rests on the substrate, never cuts into it
+    assert 20 < film.bounds[3] <= 24 + 1e-6
+    tops = [film.intersection(box(x, 0, x + 0.5, 100)).bounds[3] for x in range(5, 195, 10)]
+    assert min(tops) >= 16 - 1e-6
+    assert max(tops) - min(tops) > 2  # actually rough, not a smooth film shifted up
+    assert film.intersection(g.layers[0].polygon).area == pytest.approx(0.0, abs=1e-6)
+
+
+def test_rough_deposit_draws_the_same_grains_from_the_same_seed(recipes):
+    def film(seed):
+        g = Geometry.substrate("Si", domain_width_nm=200, thickness_nm=20)
+        g.deposit("SiO2", 20, recipes.get_deposition("CVD Conformal"), roughness_nm=4, seed=seed)
+        return g.layers[-1].polygon
+
+    assert film(7).equals(film(7))
+    assert not film(7).equals(film(8))
+
+
+def test_rough_deposit_rougher_than_its_thickness_leaves_islands(recipes):
+    g = Geometry.substrate("Si", domain_width_nm=400, thickness_nm=20)
+    g.deposit("Au", 3, recipes.get_deposition("CVD Conformal"), roughness_nm=8, seed=3)
+
+    film = g.layers[-1].polygon
+    assert len(getattr(film, "geoms", [film])) > 1
+    bare = box(0, 0, 400, 0.5).difference(film)
+    assert 0 < bare.area < 400 * 0.5
+
+
+def test_rough_directional_deposit_still_leaves_a_shadowed_face_bare(recipes):
+    """Grains only grow on a face the deposit coated: the mesa's leeward face stays bare."""
+    g = Geometry.substrate("Si", domain_width_nm=200, thickness_nm=20)
+    g.layers.append(Layer(material="W", polygon=box(80, 0, 120, 40)))
+    g.deposit("Al", 15, recipes.get_deposition("PVD Sputter (tilted)"), roughness_nm=3, seed=2)
+
+    al = next(l for l in g.layers if l.material == "Al").polygon
+    assert not al.contains(Point(123, 5))
+    assert al.contains(Point(100, 45))

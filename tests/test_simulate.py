@@ -389,3 +389,17 @@ def test_preview_runs_etches_with_fewer_substeps_and_is_cached_apart(materials, 
     monkeypatch.setattr(__import__("structureforge.process.simulate", fromlist=["_apply"]), "_apply", lambda g, step, m, r, **kw: (applied.append(kw.get("preview", False)), real_apply(g, step, m, r, **kw)))
     cache.simulate("Si", 100, 30, flow, materials, recipes)  # exact: never resumed from the preview's frames
     assert applied == [False, False, False]
+
+
+def test_a_rough_deposition_gives_the_same_film_on_every_run(materials, recipes):
+    """The grains are drawn from the step's name, so replaying a flow (or the GUI's cache missing)
+    never reshuffles them."""
+    step = Deposition(name="Gratin", material="SiO2", recipe="CVD Conformal", thickness=Length.nm(15), roughness_nm=3)
+
+    def film():
+        frames = simulate(Geometry.substrate("Si", domain_width_nm=150, thickness_nm=30), [step], materials, recipes)
+        return frames[-1].layers[-1].polygon
+
+    first = film()
+    assert first.equals(film())
+    assert first.bounds[3] > 15  # some grain stands above the nominal thickness

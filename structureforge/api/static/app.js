@@ -293,6 +293,8 @@ function buildStepFromForm() {
       material: $("dep-material").value,
       recipe: $("dep-recipe").value,
       thickness: state.lengthFields["dep-thickness"].get(),
+      roughness_nm: parseFloat($("dep-roughness").value) || null,
+      grain_nm: (parseFloat($("dep-roughness").value) > 0 && parseFloat($("dep-grain").value)) || null,
     };
   }
   if (kind === "etch") {
@@ -458,6 +460,8 @@ function populateFormFromStep(step) {
     $("dep-material").value = step.material;
     $("dep-recipe").value = step.recipe;
     state.lengthFields["dep-thickness"].set(step.thickness);
+    $("dep-roughness").value = step.roughness_nm ?? "";
+    $("dep-grain").value = step.grain_nm ?? "";
   } else if (step.kind === "etch") {
     $("etch-recipe").value = step.recipe;
     state.lengthFields["etch-depth"].set(step.depth);

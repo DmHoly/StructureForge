@@ -10,6 +10,7 @@ steps with an earlier one restarts from that earlier run's frame and replays onl
 from __future__ import annotations
 
 import hashlib
+import zlib
 from dataclasses import dataclass
 
 from ..core.materials import MaterialLibrary
@@ -209,7 +210,14 @@ def _apply(
     if isinstance(step, Deposition):
         materials.get(step.material)  # fail fast with a clear message if the material is unknown
         recipe = recipes.get_deposition(step.recipe)
-        geometry.deposit(step.material, step.thickness.to_nm(), recipe)
+        geometry.deposit(
+            step.material,
+            step.thickness.to_nm(),
+            recipe,
+            roughness_nm=step.roughness_nm,
+            grain_nm=step.grain_nm,
+            seed=zlib.crc32(step.name.encode()),  # stable across runs, unlike hash()
+        )
     elif isinstance(step, Etch):
         recipe = recipes.get_etch(step.recipe)
         geometry.etch(recipe, step.depth.to_nm(), materials, preview=preview)
