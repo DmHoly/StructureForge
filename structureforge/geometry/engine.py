@@ -1323,23 +1323,59 @@ class Geometry:
         roughness_nm: float | None = None,
         grain_nm: float | None = None,
         seed: int = 0,
+        seed_materials: list[str] | None = None,
     ) -> None:
         """`roughness_nm`: the film's outer face is no longer smooth but made of grains, each
         standing up to `roughness_nm` above or sinking as far below the nominal thickness - see
         `_roughen`. `grain_nm` is their lateral size (4x `roughness_nm` if unset), `seed` the draw:
-        the same seed on the same surface always gives the same grains."""
+        the same seed on the same surface always gives the same grains.
+
+        `seed_materials`: the film only forms on exposed surfaces made of one of these materials
+        (as `deposit_epitaxial`'s SAG selectivity), spilling at most its thickness past their
+        edges - see `_seed_surface`. None or empty: on every exposed surface."""
         before = len(self.layers)
-        solid = self.solid() if roughness_nm else None
+        solid = self.solid() if roughness_nm or seed_materials else None
+        if seed_materials:
+            seed_surface = self._seed_surface(seed_materials)
+            if seed_surface.is_empty:
+                return
         if recipe.mode is DepositionMode.conformal:
             self.deposit_conformal(material, thickness_nm)
         else:
             self.deposit_directional(material, thickness_nm, recipe.angle_deg)
+        if seed_materials and len(self.layers) > before:
+            film = _drop_tiny(_clean(self.layers[-1].polygon.intersection(seed_surface.buffer(thickness_nm, quad_segs=12))))
+            if film.is_empty:
+                self.layers.pop()
+            else:
+                self.layers[-1].polygon = film
         if roughness_nm and len(self.layers) > before:
             film = self._roughen(self.layers[-1].polygon, solid, roughness_nm, grain_nm or 4 * roughness_nm, seed)
             if film.is_empty:
                 self.layers.pop()
             else:
                 self.layers[-1].polygon = film
+
+    def _seed_surface(self, seed_materials: list[str]) -> BaseGeometry:
+        """The exposed edges made of a seed material (see `_seed_edge_filter`), as lines - the only
+        surface a selective deposit coats. Empty when no exposed edge is a seed."""
+        if not any(seed_matches(l.material, seed_materials) for l in self.layers if not l.polygon.is_empty):
+            return LineString()
+        padded = self._split_at_layer_boundaries(self._pad(self.solid()), margin=1.0)
+        edge_active = self._seed_edge_filter(seed_materials)
+        lines = []
+        for part in (padded.geoms if isinstance(padded, MultiPolygon) else [padded]):
+            coords = list(orient(part, sign=1.0).exterior.coords)
+            for (x1, y1), (x2, y2) in zip(coords, coords[1:]):
+                if max(x1, x2) < -1.0 or min(x1, x2) > self.domain_width_nm + 1.0:
+                    continue
+                length = math.hypot(x2 - x1, y2 - y1)
+                if length < 1e-12:
+                    continue
+                normal = ((y2 - y1) / length, -(x2 - x1) / length)
+                if edge_active((x1, y1), (x2, y2), normal):
+                    lines.append(LineString([(x1, y1), (x2, y2)]))
+        return unary_union(lines) if lines else LineString()
 
     def _roughen(
         self, film: BaseGeometry, solid: BaseGeometry, amplitude_nm: float, grain_nm: float, seed: int

@@ -217,6 +217,7 @@ def _apply(
             roughness_nm=step.roughness_nm,
             grain_nm=step.grain_nm,
             seed=zlib.crc32(step.name.encode()),  # stable across runs, unlike hash()
+            seed_materials=list(step.seed_materials) if step.seed_materials else None,
         )
     elif isinstance(step, Etch):
         recipe = recipes.get_etch(step.recipe)

@@ -970,3 +970,23 @@ def test_rough_directional_deposit_still_leaves_a_shadowed_face_bare(recipes):
     al = next(l for l in g.layers if l.material == "Al").polygon
     assert not al.contains(Point(123, 5))
     assert al.contains(Point(100, 45))
+
+
+def test_selective_deposit_only_coats_the_seed_surface(recipes):
+    """A Si3N4 mask on half the GaN: a deposit seeded on GaN coats the bare GaN (and spills at
+    most its thickness onto the mask's flank), never the mask's top."""
+    g = Geometry.substrate("GaN", domain_width_nm=200, thickness_nm=20)
+    g.layers.append(Layer(material="Si3N4", polygon=box(100, 0, 200, 30)))
+    g.deposit("SiO2", 10, recipes.get_deposition("CVD Conformal"), seed_materials=["GaN"])
+
+    film = g.layers[-1].polygon
+    assert film.contains(Point(50, 5))
+    assert not film.intersects(box(115, 30, 200, 50))  # mask top: bare
+    assert film.bounds[2] <= 110 + 1e-6
+
+
+def test_selective_rough_deposit_with_no_seed_exposed_adds_nothing(recipes):
+    g = Geometry.substrate("GaN", domain_width_nm=200, thickness_nm=20)
+    g.deposit_conformal("Si3N4", 10)
+    g.deposit("SiO2", 10, recipes.get_deposition("CVD Conformal"), roughness_nm=2, seed_materials=["GaN"])
+    assert [l.material for l in g.layers] == ["GaN", "Si3N4"]

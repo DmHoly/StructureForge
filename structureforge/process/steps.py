@@ -41,6 +41,10 @@ class Deposition(BaseModel):
     unset). A roughness above the thickness leaves bare spots - islands rather than a closed film.
     The grains are drawn from the step's name, so the same step always gives the same ones.
     Unset (the default), the film is smooth.
+
+    `seed_materials` makes it selective, as `EpitaxialGrowth`'s SAG: the film only forms on
+    exposed surfaces made of one of those materials, spilling at most its thickness past their
+    edges. Empty (the default), it coats every exposed surface.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -52,6 +56,7 @@ class Deposition(BaseModel):
     thickness: Length
     roughness_nm: float | None = None
     grain_nm: float | None = None
+    seed_materials: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _check_roughness(self) -> "Deposition":
