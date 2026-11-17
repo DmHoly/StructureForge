@@ -1914,7 +1914,12 @@ class Geometry:
             band = self._etch_band(solid, reach_max, recipe.angle_deg if directional else None)
             x0, x1 = (-band, w + band) if band is not None else (-w, 2 * w)
             padded = self._mirror_pad(solid, band=band, bulk=True)
-            shadow = self._shadow(solid, recipe.angle_deg, y_min, y_max, mirrored=padded) if directional else None
+            # Mirrored flanks: a point is removed only if both beams light it - in either shadow, it stays.
+            shadow = (
+                unary_union([self._shadow(solid, a, y_min, y_max, mirrored=padded) for a in recipe.beam_angles()])
+                if directional
+                else None
+            )
 
             # This substep's "air": everything in a box around the padded solid that isn't solid.
             # Each factor's erosion ring is the air dilated by that factor's reach - through air
@@ -2207,7 +2212,26 @@ class Geometry:
         def grow(geom: BaseGeometry, by: float) -> BaseGeometry:
             if isotropic:
                 return geom.buffer(by, quad_segs=12)
-            return sweep_union(geom, beam_vector(recipe.angle_deg, by))
+            angles = recipe.beam_angles()
+            if len(angles) > 1:
+                # Mirrored flanks: only what both tilts reach - a floor sinks and narrows by the
+                # slope on each side, a wall facing one beam is turned away from the other.
+                return _clean(shapely.intersection_all([sweep_union(geom, beam_vector(a, by)) for a in angles]))
+            dx, dy = beam_vector(angles[0], by)
+            swept = sweep_union(geom, (dx, dy))
+            if abs(dx) < 1e-12:
+                return swept
+            # One tilt: the angle is the slope both flanks take, leaning the same way - the
+            # leeward flank follows the shadow line, the lit one is undercut along the beam from
+            # the floor's corner. A wall already standing beside the opening is not eaten
+            # sideways, which would only translate the opening and leave that flank vertical:
+            # what the air reaches only by moving sideways, never from straight above, stays -
+            # and so does what lies behind it along the beam, which the beam would only reach
+            # through that wall's foot (the flare would come out a staircase of substeps).
+            sideways = sweep_union(geom, (dx, 0.0)).difference(sweep_union(geom, (0.0, dy)))
+            if sideways.is_empty:
+                return swept
+            return _clean(swept.difference(sweep_union(_clean(sideways), (dx, dy))))
 
         if blocked.is_empty or step >= reach:
             return grow(air, reach)

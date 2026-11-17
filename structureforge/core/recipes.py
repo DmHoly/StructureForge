@@ -45,7 +45,20 @@ class EtchRecipe(BaseModel):
     selectivity_by_material: dict[str, float] = Field(default_factory=dict)
     selectivity_by_category: dict[MaterialCategory, float] = Field(default_factory=dict)
     default_factor: float = 1.0
+    #: Directional only, nonzero angle: both flanks of the etched opening slope at `angle_deg`
+    #: as mirror images - the opening narrows going down (a tapered RIE trench, a V-groove) -
+    #: and walls already standing aren't attacked. Off, the beam keeps one tilt: both flanks
+    #: lean the same way (a parallelogram), the leeward one cut along the shadow line and the lit
+    #: one undercut, and every surface facing the beam recedes with it.
+    mirrored_flanks: bool = False
     notes: str | None = None
+
+    def beam_angles(self) -> tuple[float, ...]:
+        """The beam tilts a directional etch lights the structure with: one, or `±angle_deg` for
+        mirrored flanks (what is removed must be lit by both)."""
+        if self.mirrored_flanks and abs(self.angle_deg) > 1e-9:
+            return (abs(self.angle_deg), -abs(self.angle_deg))
+        return (self.angle_deg,)
 
     def factor_for(self, material: Material) -> float:
         """The relative etch-rate multiplier this recipe applies to `material` (1.0 = the

@@ -817,10 +817,11 @@ def test_faceted_growth_rejects_a_lateral_reach_that_is_not_positive():
 
 def test_directional_etch_consumes_a_slow_mask_at_its_own_rate(materials, recipes):
     """Si3N4 etches at 2% of Si under KOH: 45 nm of Si is 0.9 nm of mask along the 54.7 deg beam,
-    i.e. 0.52 nm off every beam-lit flat top and 0.73 nm off a beam-lit face, a leeward face
-    untouched. The ring of such a slow factor is a few hundredths of a nm thick per substep -
-    thinner than the sliver filter's threshold - and used to be dropped as numerical noise every
-    substep, so a mask slower than ~2.5% was never consumed at all."""
+    i.e. 0.52 nm off every beam-lit flat top; its walls stay where they are (the angle is the
+    slope of the flanks it opens, not a beam eating a wall sideways). The ring of such a slow
+    factor is a few hundredths of a nm thick per substep - thinner than the sliver filter's
+    threshold - and used to be dropped as numerical noise every substep, so a mask slower than
+    ~2.5% was never consumed at all."""
     from structureforge import Deposition, Etch, Length, Lithography, ResistStrip, simulate
 
     g = Geometry.substrate("Si", domain_width_nm=200.0, thickness_nm=60)
@@ -843,8 +844,57 @@ def test_directional_etch_consumes_a_slow_mask_at_its_own_rate(materials, recipe
     top = 20 - along * math.cos(math.radians(54.7))
     assert left.bounds[3] == pytest.approx(top, abs=0.02)
     assert right.bounds[3] == pytest.approx(top, abs=0.02)
-    assert right.bounds[0] == pytest.approx(140 + along * math.sin(math.radians(54.7)), abs=0.02)
+    assert right.bounds[0] == pytest.approx(140.0, abs=0.02)
     assert left.bounds[2] == pytest.approx(60.0, abs=1e-6)
+
+
+def _tilted_etch_through_a_mask(angle: float, mirrored: bool, mask_factor: float, materials) -> tuple:
+    """GaN 60 nm on Si, resist 100 nm opened over x = 150..250, 40 nm of tilted etch: GaN at 0.8x
+    (28.28 nm along a 45 deg beam = 22.63 nm down), the resist at `mask_factor`. Returns the
+    cavity etched into the GaN and the resist left."""
+    g = Geometry.substrate("Si", domain_width_nm=400, thickness_nm=50)
+    g.deposit_conformal("GaN", 60)
+    g.deposit_conformal_masked("Photoresist", 100, open_x_ranges=[(150, 250)])
+    recipe = EtchRecipe(
+        name="tilted", mode=EtchMode.directional, angle_deg=angle, mirrored_flanks=mirrored,
+        selectivity_by_material={"Photoresist": mask_factor}, default_factor=0.8,
+    )
+    g.etch(recipe, 40, materials)
+    resist = unary_union([l.polygon for l in g.layers if l.material == "Photoresist"])
+    return box(100, 0, 300, 60).difference(g.solid()), resist
+
+
+@pytest.mark.parametrize("mask_factor", [0.0, 0.8])
+def test_tilted_etch_slopes_both_flanks_the_same_way(materials, mask_factor):
+    """One tilt: a parallelogram - the leeward flank cut along the shadow line, the lit one
+    undercut from the floor's corner - and the resist walls stay put even when the resist etches
+    as fast as the GaN (the beam used to eat the lit wall sideways, which only translated the
+    opening and left that flank vertical)."""
+    cavity, resist = _tilted_etch_through_a_mask(45, False, mask_factor, materials)
+    d = 40 * 0.8 * math.sqrt(0.5)
+    assert cavity.bounds[1] == pytest.approx(60 - d, abs=0.05)
+    # At mid-depth, the opening spans 150..250 shifted right by the depth reached there.
+    mid = cavity.intersection(box(100, 60 - d / 2 - 0.01, 300, 60 - d / 2 + 0.01)).bounds
+    assert mid[0] == pytest.approx(150 + d / 2, abs=0.1)
+    assert mid[2] == pytest.approx(250 + d / 2, abs=0.1)
+    assert resist.intersection(box(100, 60, 200, 200)).bounds[2] == pytest.approx(150, abs=1e-6)
+    assert resist.intersection(box(200, 60, 300, 200)).bounds[0] == pytest.approx(250, abs=1e-6)
+
+
+@pytest.mark.parametrize("angle", [45, -45])
+def test_mirrored_flanks_etch_opens_a_symmetric_taper(materials, angle):
+    """Mirrored flanks: both flanks slope inwards at the angle (whatever its sign) - a trapezoid
+    narrowing going down - and no wall of the opening recedes sideways."""
+    cavity, resist = _tilted_etch_through_a_mask(angle, True, 0.8, materials)
+    d = 40 * 0.8 * math.sqrt(0.5)
+    assert cavity.bounds[1] == pytest.approx(60 - d, abs=0.05)
+    assert cavity.bounds[0] == pytest.approx(150, abs=0.05)
+    assert cavity.bounds[2] == pytest.approx(250, abs=0.05)
+    floor = cavity.intersection(box(100, 60 - d - 0.01, 300, 60 - d + 0.5)).bounds
+    assert floor[0] == pytest.approx(150 + d, abs=0.6)
+    assert floor[2] == pytest.approx(250 - d, abs=0.6)
+    assert resist.intersection(box(100, 60, 200, 200)).bounds[2] == pytest.approx(150, abs=1e-6)
+    assert resist.intersection(box(200, 60, 300, 200)).bounds[0] == pytest.approx(250, abs=1e-6)
 
 
 # -- substeps of a directional etch -------------------------------------------------------------
