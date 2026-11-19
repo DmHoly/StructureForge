@@ -14,7 +14,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from ..core.units import Length
 
@@ -33,6 +33,21 @@ class GrowthOrientation(str, Enum):
     semi_polar = "semi_polar"
 
 
+class DepositionSide(str, Enum):
+    """Which face of the wafer a `Deposition` coats.
+
+    front - the processed top surface (the default, and the only face before this field existed).
+    back  - the wafer's backside, under the substrate, without turning the wafer over: the film
+            is a uniform slab of the full domain width below the current bottom (a backside is
+            flat, so every recipe gives the same film there).
+    both  - the front as usual, then the backside.
+    """
+
+    front = "front"
+    back = "back"
+    both = "both"
+
+
 class Deposition(BaseModel):
     """A film of `material`, `thickness` thick, laid by `recipe` (conformal or directional).
 
@@ -45,6 +60,12 @@ class Deposition(BaseModel):
     `seed_materials` makes it selective, as `EpitaxialGrowth`'s SAG: the film only forms on
     exposed surfaces made of one of those materials, spilling at most its thickness past their
     edges. Empty (the default), it coats every exposed surface.
+
+    `side` picks the face: the front (default), the backside (no `Flip` needed - the film shows
+    under the substrate, and a later `Flip` brings it on top), or both. On the backside the film
+    is smooth whatever `roughness_nm`, and with `seed_materials` it only forms when the wafer's
+    bottom material is a seed. A front-side step serializes without the field, exactly as before
+    it existed, so stored processes and cache keys don't change.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -57,6 +78,14 @@ class Deposition(BaseModel):
     roughness_nm: float | None = None
     grain_nm: float | None = None
     seed_materials: list[str] = Field(default_factory=list)
+    side: DepositionSide = DepositionSide.front
+
+    @model_serializer(mode="wrap")
+    def _omit_front_side(self, handler):  # type: ignore[no-untyped-def]
+        data = handler(self)
+        if isinstance(data, dict) and self.side is DepositionSide.front:
+            data.pop("side", None)
+        return data
 
     @model_validator(mode="after")
     def _check_roughness(self) -> "Deposition":

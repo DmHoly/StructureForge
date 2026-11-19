@@ -18,7 +18,7 @@ from ..core.recipes import RecipeLibrary
 from ..core.traced import Traced
 from ..core.units import Length
 from ..geometry.engine import Geometry, Layer, LayerProvenance
-from .steps import ChemicalStep, Deposition, EpitaxialGrowth, FacetEnvelope, FacetedGrowth, Etch, Flip, Lithography, Planarization, ProcessStep, ResistStrip
+from .steps import ChemicalStep, Deposition, DepositionSide, EpitaxialGrowth, FacetEnvelope, FacetedGrowth, Etch, Flip, Lithography, Planarization, ProcessStep, ResistStrip
 
 
 class SimulationError(RuntimeError):
@@ -112,12 +112,15 @@ def _restore(frame: Frame, floor_nm: float | None) -> Geometry:
     """The live `Geometry` a frame was taken from, rebuilt from its snapshot: the frame's layers
     are copied (their polygons are never mutated, only reassigned, so sharing them is safe - see
     `_snapshot`), and `floor_nm` is what `Geometry.substrate` set, unchanged by every step (a
-    `Flip` mirrors about the stack's own mid-height)."""
+    `Flip` mirrors about the stack's own mid-height) but a backside deposition, which lowers it."""
     geometry = Geometry(
         frame.domain_width_nm,
         [Layer(material=l.material, polygon=l.polygon, provenance=l.provenance) for l in frame.layers],
     )
-    geometry.floor_nm = floor_nm
+    # a backside deposition lowers the floor to the film's own bottom: the stack never reaches
+    # below its floor otherwise, so the lower of the two is the frame's floor
+    solid = geometry.solid()
+    geometry.floor_nm = floor_nm if floor_nm is None or solid.is_empty else min(floor_nm, solid.bounds[1])
     return geometry
 
 
@@ -210,15 +213,22 @@ def _apply(
     if isinstance(step, Deposition):
         materials.get(step.material)  # fail fast with a clear message if the material is unknown
         recipe = recipes.get_deposition(step.recipe)
-        geometry.deposit(
-            step.material,
-            step.thickness.to_nm(),
-            recipe,
-            roughness_nm=step.roughness_nm,
-            grain_nm=step.grain_nm,
-            seed=zlib.crc32(step.name.encode()),  # stable across runs, unlike hash()
-            seed_materials=list(step.seed_materials) if step.seed_materials else None,
-        )
+        if step.side is not DepositionSide.back:
+            geometry.deposit(
+                step.material,
+                step.thickness.to_nm(),
+                recipe,
+                roughness_nm=step.roughness_nm,
+                grain_nm=step.grain_nm,
+                seed=zlib.crc32(step.name.encode()),  # stable across runs, unlike hash()
+                seed_materials=list(step.seed_materials) if step.seed_materials else None,
+            )
+        if step.side is not DepositionSide.front:
+            geometry.deposit_backside(
+                step.material,
+                step.thickness.to_nm(),
+                seed_materials=list(step.seed_materials) if step.seed_materials else None,
+            )
     elif isinstance(step, Etch):
         recipe = recipes.get_etch(step.recipe)
         geometry.etch(recipe, step.depth.to_nm(), materials, preview=preview)

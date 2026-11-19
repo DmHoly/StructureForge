@@ -1356,6 +1356,28 @@ class Geometry:
             else:
                 self.layers[-1].polygon = film
 
+    def deposit_backside(self, material: str, thickness_nm: float, seed_materials: list[str] | None = None) -> None:
+        """A film on the wafer's backside, without turning it over: a uniform slab of the whole
+        domain width under the current bottom (the floor, flat by construction), which becomes the
+        new floor - the bulk padding now stands under the film, so later front-side steps never
+        reach it. The layer is appended like any other; a later `flip` brings it on top.
+
+        `seed_materials`: only when the bottom material is one of them (the backside is a single
+        flat surface, so it is coated whole or not at all)."""
+        if thickness_nm <= 0:
+            return
+        solid = self.solid()
+        if solid.is_empty:
+            raise ValueError("backside deposition: no substrate to coat")
+        bottom = self.floor_nm if self.floor_nm is not None else solid.bounds[1]
+        if seed_materials:
+            below = [l.material for l in self.layers if not l.polygon.is_empty and l.polygon.bounds[1] <= bottom + 1e-6]
+            if not any(seed_matches(m, seed_materials) for m in below):
+                return
+        self.layers.append(Layer(material=material, polygon=box(0.0, bottom - thickness_nm, self.domain_width_nm, bottom)))
+        if self.floor_nm is not None:
+            self.floor_nm = bottom - thickness_nm
+
     def _seed_surface(self, seed_materials: list[str]) -> BaseGeometry:
         """The exposed edges made of a seed material (see `_seed_edge_filter`), as lines - the only
         surface a selective deposit coats. Empty when no exposed edge is a seed."""

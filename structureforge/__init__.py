@@ -30,6 +30,7 @@ from .geometry.engine import Geometry, Layer
 from .process.steps import (
     ChemicalStep,
     Deposition,
+    DepositionSide,
     EpitaxialGrowth,
     Etch,
     FacetEnvelope,
@@ -70,6 +71,7 @@ __all__ = [
     "Layer",
     "ProcessStep",
     "Deposition",
+    "DepositionSide",
     "Etch",
     "Planarization",
     "ChemicalStep",
