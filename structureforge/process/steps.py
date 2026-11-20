@@ -34,7 +34,7 @@ class GrowthOrientation(str, Enum):
 
 
 class DepositionSide(str, Enum):
-    """Which face of the wafer a `Deposition` coats.
+    """Which face of the wafer a `Deposition` coats (or an `Etch` attacks).
 
     front - the processed top surface (the default, and the only face before this field existed).
     back  - the wafer's backside, under the substrate, without turning the wafer over: the film
@@ -99,12 +99,28 @@ class Deposition(BaseModel):
 
 
 class Etch(BaseModel):
+    """Remove `depth` of material by `recipe` (its selectivity sets how fast each material goes).
+
+    `side` picks the face, as for `Deposition`: the front (default), the backside (no `Flip`
+    needed - the same recipe acts from under the substrate, the front left as it is), or both
+    (the front, then the backside). A front-side step serializes without the field, exactly as
+    before it existed, so stored processes and cache keys don't change.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["etch"] = "etch"
     name: str
     recipe: str
     depth: Length
+    side: DepositionSide = DepositionSide.front
+
+    @model_serializer(mode="wrap")
+    def _omit_front_side(self, handler):  # type: ignore[no-untyped-def]
+        data = handler(self)
+        if isinstance(data, dict) and self.side is DepositionSide.front:
+            data.pop("side", None)
+        return data
 
 
 class Planarization(BaseModel):

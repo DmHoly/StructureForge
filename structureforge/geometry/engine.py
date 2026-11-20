@@ -296,6 +296,7 @@ _ALLOY_NAME = re.compile(r"^(In|Al)\d+(?:\.\d+)?Ga\d+(?:\.\d+)?N$")
 _SEED_PROBE_DEPTH = 0.25  # nm - how far inside an exposed edge to look for the material it belongs to:
                           # deep enough to see past an etch's sub-angstrom residue film, far thinner
                           # than any real layer.
+_BACKSIDE_CARRIER = "__backside_carrier__"  # held layer protecting the front during a backside etch, see Geometry.etch_backside
 _RESIDUE_NM = 0.1  # nm - etched layers thinner than twice this are leftover residue, see Geometry.etch
 _FRONT_SMOOTH = 0.2  # nm - bumps below this are trimmed off a growth front, see Geometry._deposit_faceted_once
 _MIN_NUCLEATION_EDGE = 1.0  # nm - a shorter edge between two parallel ones is a step, not a facet, see _offset_named_facets
@@ -1906,7 +1907,11 @@ class Geometry:
         """
         if depth_nm <= 0 or not self.layers:
             return
-        factors = [recipe.factor_for(materials.get(l.material)) for l in self.layers]
+        def factor_of(layer: Layer) -> float:
+            # the carrier of a backside etch (see `etch_backside`) is never etched
+            return 0.0 if layer.material == _BACKSIDE_CARRIER else recipe.factor_for(materials.get(layer.material))
+
+        factors = [factor_of(l) for l in self.layers]
         live = [i for i, l in enumerate(self.layers) if not l.polygon.is_empty]
         if not live:
             return
@@ -2010,7 +2015,7 @@ class Geometry:
         # (e.g. on the floor of a mask opening) that a real over-etch would clear - and that would
         # otherwise read as a mask covering the seed. Morphological opening removes only such films.
         for layer in self.layers:
-            if layer.polygon.is_empty or recipe.factor_for(materials.get(layer.material)) <= 0:
+            if layer.polygon.is_empty or factor_of(layer) <= 0:
                 continue
             opened = layer.polygon.buffer(-_RESIDUE_NM, join_style="mitre").buffer(_RESIDUE_NM, join_style="mitre")
             layer.polygon = _drop_tiny(_clean(layer.polygon.intersection(opened)))
@@ -2023,15 +2028,65 @@ class Geometry:
         # etched layer's *exposed* edges to within its own step height (never more than a couple
         # of monolayers); the edges it shares with other layers are left exactly as they are, so
         # neighbours still fit together without slits or overlaps.
-        fastest = max((recipe.factor_for(materials.get(l.material)) for l in self.layers if not l.polygon.is_empty), default=0.0)
+        fastest = max((factor_of(l) for l in self.layers if not l.polygon.is_empty), default=0.0)
         for layer in self.layers:
-            factor = recipe.factor_for(materials.get(layer.material))
+            factor = factor_of(layer)
             if layer.polygon.is_empty or factor <= 0 or factor >= fastest:
                 continue  # the fastest layer is never uncovered by anything: its front is already smooth
             others = [l.polygon for l in self.layers if l is not layer and not l.polygon.is_empty]
             interface = unary_union(others) if others else Polygon()
             tol = min(1.5 * substep * factor, _ETCH_SMOOTH_MAX)
             layer.polygon = self._smooth_exposed(layer.polygon, tol, interface)
+
+    def etch_backside(
+        self,
+        recipe: EtchRecipe,
+        depth_nm: float,
+        materials: MaterialLibrary,
+        steps: int | None = None,
+        preview: bool = False,
+    ) -> None:
+        """`etch` on the wafer's backside, without turning it over (the counterpart of
+        `deposit_backside`): the same recipe, selectivity and depth, acting from the bottom up.
+
+        The front is held by a temporary carrier filling all the air over the wafer, which this
+        etch never touches; the stack is mirrored so the backside faces up, etched with the
+        carrier's flat face as the floor, then mirrored back and the carrier dropped - so the
+        front comes out exactly as it went in, whatever its shape (no flat surface needed, unlike
+        `flip`). The floor rises to the etched backside's lowest point: the bulk padding stays
+        under it, and later front-side steps still never reach the backside."""
+        if depth_nm <= 0:
+            return
+        solid = self.solid()
+        if solid.is_empty:
+            raise ValueError("backside etch: no substrate to etch")
+        bottom = self.floor_nm if self.floor_nm is not None else solid.bounds[1]
+        top = solid.bounds[3] + _MARGIN
+        carrier = _clean(box(0.0, bottom, self.domain_width_nm, top).difference(solid))
+        axis = (bottom + top) / 2.0
+
+        def mirrored(geom: BaseGeometry) -> BaseGeometry:
+            return geom if geom.is_empty else _clean(scale(geom, xfact=1.0, yfact=-1.0, origin=(0.0, axis)))
+
+        front_floor = self.floor_nm
+        # carrier first: it is the anchor below, as the substrate is face up
+        self.layers = [Layer(material=_BACKSIDE_CARRIER, polygon=mirrored(carrier))] + [
+            Layer(material=l.material, polygon=mirrored(l.polygon), provenance=l.provenance) for l in self.layers
+        ]
+        self.floor_nm = bottom  # the carrier's flat face: top mirrors onto bottom
+        try:
+            self.etch(recipe, depth_nm, materials, steps=steps, preview=preview)
+        finally:
+            self.layers = [
+                Layer(material=l.material, polygon=mirrored(l.polygon), provenance=l.provenance)
+                for l in self.layers
+                if l.material != _BACKSIDE_CARRIER
+            ]
+            self.floor_nm = front_floor
+        if front_floor is not None:
+            solid = self.solid()
+            if not solid.is_empty:
+                self.floor_nm = max(front_floor, solid.bounds[1])
 
     def _etch_steps(self, recipe: EtchRecipe, depth_nm: float, factors: list[float], live: list[int]) -> int:
         """How many substeps `etch` runs (see its docstring for what they buy). The default,

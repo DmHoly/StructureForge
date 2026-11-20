@@ -38,6 +38,8 @@ class Frame:
     step_name: str
     layers: list[Layer]
     domain_width_nm: float
+    # the geometry's `floor_nm` at this frame, for `_restore` (a backside etch raises it)
+    floor_nm: float | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -81,7 +83,7 @@ def simulate(
     every etch runs a few times fewer substeps (see `Geometry.etch`), which shifts an isotropic
     front by a few nm at most - for a quick look while editing, not for a result to keep.
     """
-    frames = [Frame(0, "initial", "Structure de depart", _snapshot(initial), initial.domain_width_nm)]
+    frames = [Frame(0, "initial", "Structure de depart", _snapshot(initial), initial.domain_width_nm, initial.floor_nm)]
     return _simulate_from(initial, steps, materials, recipes, frames, preview=preview)
 
 
@@ -104,19 +106,23 @@ def _simulate_from(
             geometry.compact()
         except Exception as exc:
             raise SimulationError(i, step, exc) from exc
-        frames.append(Frame(i, step.kind, step.name, _snapshot(geometry), geometry.domain_width_nm))
+        frames.append(Frame(i, step.kind, step.name, _snapshot(geometry), geometry.domain_width_nm, geometry.floor_nm))
     return frames
 
 
 def _restore(frame: Frame, floor_nm: float | None) -> Geometry:
     """The live `Geometry` a frame was taken from, rebuilt from its snapshot: the frame's layers
     are copied (their polygons are never mutated, only reassigned, so sharing them is safe - see
-    `_snapshot`), and `floor_nm` is what `Geometry.substrate` set, unchanged by every step (a
-    `Flip` mirrors about the stack's own mid-height) but a backside deposition, which lowers it."""
+    `_snapshot`), and `floor_nm` is the frame's own (a backside deposition lowers it, a backside
+    etch raises it); a frame made without one falls back on what `Geometry.substrate` set,
+    lowered to the stack's bottom."""
     geometry = Geometry(
         frame.domain_width_nm,
         [Layer(material=l.material, polygon=l.polygon, provenance=l.provenance) for l in frame.layers],
     )
+    if frame.floor_nm is not None:
+        geometry.floor_nm = frame.floor_nm
+        return geometry
     # a backside deposition lowers the floor to the film's own bottom: the stack never reaches
     # below its floor otherwise, so the lower of the two is the frame's floor
     solid = geometry.solid()
@@ -231,7 +237,10 @@ def _apply(
             )
     elif isinstance(step, Etch):
         recipe = recipes.get_etch(step.recipe)
-        geometry.etch(recipe, step.depth.to_nm(), materials, preview=preview)
+        if step.side is not DepositionSide.back:
+            geometry.etch(recipe, step.depth.to_nm(), materials, preview=preview)
+        if step.side is not DepositionSide.front:
+            geometry.etch_backside(recipe, step.depth.to_nm(), materials, preview=preview)
     elif isinstance(step, Planarization):
         target = step.target_level.to_nm() if step.target_level is not None else None
         geometry.planarize(target_level_nm=target, stop_material=step.stop_material)
