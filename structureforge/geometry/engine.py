@@ -292,6 +292,18 @@ def _thin_area(blocked: BaseGeometry, r: float, window: tuple[float, float] | No
             area += measured(overshoot).area
     return max(0.0, area)
 
+def _measure_window(x0: float, x1: float, reach: float, width: float) -> tuple[float, float]:
+    """The x-range `_thin_area` measures in, for a solid mirror-padded over `[x0, x1]`: shrunk by
+    `reach` on each side, past which a thin part may only be the crop cut of a mirror image. A
+    reach past half the padded width (a micrometre-deep etch on a single-wire domain) leaves no
+    such range - shrunk, it would be inverted, which GEOS rejects ("Clipping rectangle must be
+    non-empty") - so the domain `[0, width]` itself is measured, whose geometry is always real:
+    the padded solid is then narrower than the probe, everything in it reads as thin, and the
+    caller takes the cautious path (finer dilation steps, more substeps) - never a wrong one."""
+    a, b = x0 + reach, x1 - reach
+    return (a, b) if a < b else (0.0, width)
+
+
 _ALLOY_NAME = re.compile(r"^(In|Al)\d+(?:\.\d+)?Ga\d+(?:\.\d+)?N$")
 _SEED_PROBE_DEPTH = 0.25  # nm - how far inside an exposed edge to look for the material it belongs to:
                           # deep enough to see past an etch's sub-angstrom residue film, far thinner
@@ -1954,7 +1966,7 @@ class Geometry:
             air_box = box(x0 - reach_max - _MARGIN, y_min - reach_max - _MARGIN, x1 + reach_max + _MARGIN, y_max + reach_max + _MARGIN)
             air = self._outside_air(air_box.difference(padded), air_box)
             # Thin parts of a band-cropped mirror image near the crop cut are not real geometry.
-            window = (x0 + reach_max, x1 - reach_max)
+            window = _measure_window(x0, x1, reach_max, w)
 
             ring_by_factor: dict[float, BaseGeometry] = {}
             for factor in distinct_factors:
@@ -2118,7 +2130,7 @@ class Geometry:
             f_slow = max(factors[i] for i in slower)
             r = 2 * depth_nm * f_slow
             blocked = self._mirror_pad(_robust_union([self.layers[i].polygon for i in slower]), band=r + 2 * _MARGIN)
-            window = (-2 * _MARGIN, w + 2 * _MARGIN) if r + 2 * _MARGIN < w else (-w + r, 2 * w - r)
+            window = (-2 * _MARGIN, w + 2 * _MARGIN) if r + 2 * _MARGIN < w else _measure_window(-w, 2 * w, r, w)
             if _thin_area(blocked, r, window) > _speck_tol(r):
                 return default
         shapely.prepare(solid)
